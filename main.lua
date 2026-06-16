@@ -6262,7 +6262,7 @@ LPH_NO_VIRTUALIZE(function()
 				health_bar_color = { Color3.new(1, 1, 1), Color3.new(1, 1, 1) },
 				name_color = { Color3.new(1, 1, 1), 0 },
 				health_text_color = { Color3.new(1, 1, 1), 0 },
-				dist_color = { Color3.new(1, 1, 1), 0 },
+				distance_color = { Color3.new(1, 1, 1), 0 },
 				weapon_color = { Color3.new(1, 1, 1), 0 },
 				skeleton_color = { Color3.new(1, 1, 1), 0 },
 				flags_color = { Color3.new(1, 1, 1), 0 },
@@ -6358,8 +6358,12 @@ LPH_NO_VIRTUALIZE(function()
 			corners[i] = worldToScreen((cframe + size * 0.5 * vertice).Position)
 		end
 
-		local min = _Vector2zeromin(Camera.ViewportSize, unpack(corners))
-		local max = _Vector2zeromax(Vector2.zero, unpack(corners))
+		local min = Camera.ViewportSize
+		local max = Vector2.zero
+		for _, corner in corners do
+			min = _Vector2zeromin(min, corner)
+			max = _Vector2zeromax(max, corner)
+		end
 		return {
 			corners = corners,
 			topLeft = _Vector2new(min.X, min.Y),
@@ -8259,7 +8263,7 @@ local hm_screen_pos = nil
 do
 	local aimsec = ui.sections.aimbot_main
 	local chksec = ui.sections.aimbot_main  -- "Checks" merged into Aimbot section
-	local samsec = ui.sections.aimbot_silent
+	-- local samsec = ui.sections.aimbot_silent
 	local hitsec = ui.sections.hit_detection
 	local gunsec = ui.sections.gunmods
 
@@ -8708,7 +8712,7 @@ do
 		end
 
 		local function rich_escape(text)
-			return tostring(text):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&apos;")
+			return (tostring(text):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&apos;"))
 		end
 
 		local function color_to_rgb(color)
@@ -10588,8 +10592,7 @@ do
 			desync_ready = false
 			forced_cframe = hrp.CFrame
 
-			local recorded_time = tick()
-			repeat until tick() - recorded_time > 0.8
+			task.wait(0.8)
 
 			Library.Notification("Don't move for until this notification goes away.", 3)
 
@@ -10697,6 +10700,7 @@ do
 		local packet_timer_manipulation = tick()
 
 		raknet.add_send_hook(function(packetData)
+			if buffer.len(packetData) < 17 then return true end
 			local packetId = buffer.readu8(packetData, 0)
 			if packetId == 0x1B then
 				if not (raksync and raksync_key) then
