@@ -6181,14 +6181,14 @@ cheat.utility = {} do
 			end
 		end)() end
 	local connection; connection = RunService.Heartbeat:Connect(LPH_NO_VIRTUALIZE(function(delta)
-		for _, func in cheat.connections.heartbeats do
-			func(delta)
-		end
+		local hb = cheat.connections.heartbeats
+		if not next(hb) then return end
+		for _, func in hb do func(delta) end
 	end))
 	local connection1; connection1 = RunService.RenderStepped:Connect(LPH_NO_VIRTUALIZE(function(delta)
-		for _, func in cheat.connections.renderstepped do
-			func(delta)
-		end
+		local rs = cheat.connections.renderstepped
+		if not next(rs) then return end
+		for _, func in rs do func(delta) end
 	end))
 	cheat.utility.unload = function()
 		connection:Disconnect()
@@ -6278,7 +6278,7 @@ LPH_NO_VIRTUALIZE(function()
 			},
 			self_chams = {
 				enabled = false,
-				style = "Ocean Gel",
+				style = "ForceField",
 				color = { Library.Theme.accent or Color3.new(1, 1, 1), 0 },
 				glow_factor = 3,
 				highlight = false,
@@ -7351,21 +7351,33 @@ elseif style == "Rainbow" then
 		return tool and tool.Name
 	end
 
+	-- Debounced icaca
 	function esp_table.icaca()
-		for _, v in loaded_plrs do
-			task.spawn(function() v:forceupdate() end)
+		for _, v in pairs(loaded_plrs) do
+			v:forceupdate()
 		end
 	end
 
 	local original_properties = setmetatable({}, {__mode = "k"})
 	local clothing_cache = setmetatable({}, {__mode = "k"})
 
+	local isBodyPart_cache = setmetatable({}, {__mode = "k"})
+	
 	local function isBodyPart(part)
-		local name = part.Name
-		if name == "HumanoidRootPart" then return false end
-		if part:FindFirstAncestorOfClass("Tool") then return false end
+		local cached = isBodyPart_cache[part]
+		if cached ~= nil then return cached end
 		
-		-- Ignore weapons/viewmodels/arms folders
+		local name = part.Name
+		if name == "HumanoidRootPart" then 
+			isBodyPart_cache[part] = false
+			return false 
+		end
+		if part:FindFirstAncestorOfClass("Tool") then 
+			isBodyPart_cache[part] = false
+			return false 
+		end
+		
+		-- Ignore weapons/viewmodels folders
 		local parent = part.Parent
 		while parent and parent ~= workspace do
 			local p_name = parent.Name:lower()
@@ -7375,7 +7387,13 @@ elseif style == "Rainbow" then
 			parent = parent.Parent
 		end
 		
-		return true
+		local result = true
+		local p_name = parent.Name:lower()
+		if p_name:find("weapon") or p_name:find("viewmodel") then
+			result = false
+		end
+		isBodyPart_cache[part] = result
+		return result
 	end
 
 	local function hide_clothing(character)
@@ -7438,187 +7456,76 @@ elseif style == "Rainbow" then
 	end
 
 						local function apply_self_cham_to_part(part, style, base_color, transparency, glow)
-		if not (part and part:IsA("BasePart") and isBodyPart(part)) then return end
+	if not (part and part:IsA("BasePart") and isBodyPart(part)) then return end
 
-		-- Destroy any leftover forcefield overlays from the previous step
-		local overlay = part:FindFirstChild("SelfChamOverlay")
-		if overlay then
-			overlay:Destroy()
-		end
+	local now = tick()
+	local color = base_color
+	local target_transparency = transparency
+	local reflectance = 0
+	local material = Enum.Material.SmoothPlastic
 
-		if not original_properties[part] then
-			original_properties[part] = {
-				Material = part.Material,
-				Color = part.Color,
-				Transparency = part.Transparency,
-				Reflectance = part.Reflectance,
-				MeshPartTextureID = part:IsA("MeshPart") and part.TextureID or nil,
-				SpecialMeshes = {},
-				Decals = {}
-			}
-			for _, child in part:GetChildren() do
-				if child:IsA("SpecialMesh") then
-					original_properties[part].SpecialMeshes[child] = {
-						TextureId = child.TextureId,
-						VertexColor = child.VertexColor
-					}
-				elseif child:IsA("Decal") then
-					original_properties[part].Decals[child] = child.Texture
-				end
-			end
-		end
+	if style == "Glow" then
+		material = Enum.Material.Neon
+		target_transparency = 0
+	elseif style == "Wireframe" then
+		material = Enum.Material.ForceField
+		target_transparency = 0.7
+	elseif style == "ForceField" then
+		material = Enum.Material.ForceField
+	elseif style == "Flat" then
+		material = Enum.Material.SmoothPlastic
+		target_transparency = 0
+	elseif style == "Glass" then
+		material = Enum.Material.Glass
+		target_transparency = 0.38
+		reflectance = 0.5
+	elseif style == "Pulse" then
+		material = Enum.Material.Neon
+		local wave = (math.sin(now * 1.0) + 1) * 0.5
+		local pulse = 1.0 + (1 - wave) * 0.35
+		color = Color3.new(
+			math.clamp(base_color.R * pulse, 0, 1),
+			math.clamp(base_color.G * pulse, 0, 1),
+			math.clamp(base_color.B * pulse, 0, 1)
+		)
+		target_transparency = 0.08 + wave * 0.82
+	elseif style == "Rainbow" then
+		material = Enum.Material.Neon
+		color = Color3.fromHSV((now * 0.03) % 1, 0.75, 1)
+		target_transparency = 0.28
+	end
 
-		local now = tick()
-		local color = base_color
-		local target_transparency = transparency
-		local reflectance = 0
-		local material = Enum.Material.SmoothPlastic
-		local texture_id = "rbxassetid://9883582451" -- Default to fully transparent texture to clear default skins
+	pcall(function()
+		part.Material = material
+		part.Color = color
+		part.Transparency = target_transparency
+		part.Reflectance = reflectance
+	end)
 
-		if style == "Ocean Gel" then
-			-- Highly reflective semi-transparent Glass material with no 2D textures to allow 100% pure, perfect color rendering and refraction!
-			material = Enum.Material.Glass
-			reflectance = 0.5
-			color = base_color
-			target_transparency = 0.5
-			texture_id = "" -- Keep empty to prevent grey head and ensure perfect glass coloring matching the body!
-		elseif style == "Glow" then
-			material = Enum.Material.Neon
-			color = base_color
-			target_transparency = 0
-			texture_id = ""
-		elseif style == "Flat" then
-			material = Enum.Material.SmoothPlastic
-			color = base_color
-			target_transparency = 0
-			texture_id = ""
-		elseif style == "ForceField" then
-			material = Enum.Material.ForceField
-			color = base_color
-			target_transparency = transparency
-			local props = original_properties[part]
-			if props then
-				if props.MeshPartTextureID and props.MeshPartTextureID ~= "" then
-					texture_id = props.MeshPartTextureID
-				else
-					texture_id = "rbxassetid://9883582451"
-				end
-			else
-				texture_id = "rbxassetid://9883582451"
-			end
-		elseif style == "Glass" then
-			material = Enum.Material.Glass
-			color = base_color
-			target_transparency = 0.38
-			reflectance = 0.5
-			texture_id = ""
-		elseif style == "Pulse" then
-			material = Enum.Material.Neon
-			local wave = (math.sin(now * 1.0) + 1) * 0.5
-			local pulse = 1.0 + (1 - wave) * 0.35
-			color = Color3.new(
-				math.clamp(base_color.R * pulse, 0, 1),
-				math.clamp(base_color.G * pulse, 0, 1),
-				math.clamp(base_color.B * pulse, 0, 1)
-			)
-			target_transparency = 0.08 + wave * 0.82
-			texture_id = ""
-		elseif style == "Rainbow" then
-			material = Enum.Material.Neon
-			color = Color3.fromHSV((now * 0.03) % 1, 0.75, 1)
-			target_transparency = 0.28
-			texture_id = ""
-		end
-
-		pcall(function()
-			part.Material = material
-			part.Color = color
-			part.Transparency = target_transparency
-			part.Reflectance = reflectance
-		end)
-
-		-- Hide standard face decals
-		for _, child in part:GetChildren() do
-			if child:IsA("Decal") then
-				pcall(function() child.Texture = "" end)
-			end
-		end
-
-		-- Apply transparent texture (or custom forcefield) to meshes
-		local has_mesh = part:IsA("MeshPart")
-		local special_mesh = nil
-		for _, child in part:GetChildren() do
-			if child:IsA("SpecialMesh") then
-				has_mesh = true
-				special_mesh = child
-				break
-			end
-		end
-
-		if has_mesh then
-			if part:IsA("MeshPart") then
-				pcall(function() part.TextureID = texture_id end)
-			end
-			if special_mesh then
-				local spec_tex = (style == "Ocean Gel") and "" or texture_id
-				if style == "ForceField" then
-					spec_tex = "rbxassetid://9883582451"
-					local props = original_properties[part]
-					if props and props.SpecialMeshes and props.SpecialMeshes[special_mesh] and props.SpecialMeshes[special_mesh].TextureId ~= "" then
-						spec_tex = props.SpecialMeshes[special_mesh].TextureId
-					end
-				end
-				pcall(function() special_mesh.TextureId = spec_tex end)
-				-- Apply custom vertex color to special mesh so it colors exactly matching the body part (prevents grey head!)
-				pcall(function()
-					special_mesh.VertexColor = Vector3.new(color.R, color.G, color.B)
-				end)
-			end
-		end
-
-		-- Handle 6-sided textures for non-mesh blocks in Forcefield only
-		local use_6_sided = (style == "ForceField" and not has_mesh)
-		if not use_6_sided then
-			for _, child in part:GetChildren() do
-				if child.Name == "SelfChamTexture" or child.Name == "SelfChamOutline" then
-					child:Destroy()
-				end
-			end
-		else
-			local existing_textures = {}
-			for _, child in part:GetChildren() do
-				if child.Name == "SelfChamTexture" and child:IsA("Texture") then
-					existing_textures[child.Face] = child
-				end
-			end
-
-			local faces = {
-				Enum.NormalId.Front,
-				Enum.NormalId.Back,
-				Enum.NormalId.Left,
-				Enum.NormalId.Right,
-				Enum.NormalId.Top,
-				Enum.NormalId.Bottom
-			}
-
-			for _, face in faces do
-				local tex = existing_textures[face]
-				if not tex then
-					tex = Instance.new("Texture")
-					tex.Name = "SelfChamTexture"
-					tex.Face = face
-					tex.Parent = part
-				end
-				tex.Texture = texture_id
-				tex.Color3 = color
-				tex.Transparency = target_transparency
-				tex.StudsPerTileU = 2
-				tex.StudsPerTileV = 2
-				tex.OffsetStudsU = (now * 0.5) % 2
-				tex.OffsetStudsV = (now * 0.5) % 2
-			end
+	-- VertexColor tints the texture with cham color
+	local special_mesh = nil
+	for _, child in part:GetChildren() do
+		if child:IsA("SpecialMesh") then
+			special_mesh = child
+			break
 		end
 	end
+
+	if special_mesh then
+		pcall(function()
+			special_mesh.VertexColor = Vector3.new(color.R, color.G, color.B)
+		end)
+	end
+
+	-- Hide face decals
+	for _, child in part:GetChildren() do
+		if child:IsA("Decal") then
+			pcall(function() child.Texture = "" end)
+		end
+	end
+end
+
+
 
 	local function apply_self_cham_highlight(character, color, trans)
 		if not character then return end
@@ -7648,7 +7555,7 @@ elseif style == "Rainbow" then
 		local character = lplr.Character
 
 		-- Determine if we should show the Highlight on the local player character
-		local show_highlight = self_chams.highlight or (self_chams.enabled and self_chams.style == "Ocean Gel")
+		local show_highlight = self_chams.highlight or (self_chams.enabled and self_chams.style == "Flat")
 		local highlight_color = Color3.new(1, 1, 1)
 		local highlight_trans = 0.45
 
@@ -7656,7 +7563,7 @@ elseif style == "Rainbow" then
 			-- Use chosen custom Self highlight color and transparency
 			highlight_color = self_chams.highlight_color[1] or Color3.fromRGB(0, 102, 255)
 			highlight_trans = self_chams.highlight_color[2] or 0.1
-		elseif self_chams.enabled and self_chams.style == "Ocean Gel" then
+		elseif self_chams.enabled and self_chams.style == "Flat" then
 			-- Default bold outline for Ocean Gel style
 			highlight_color = self_chams.color[1]
 			highlight_trans = 0.02
@@ -7695,14 +7602,17 @@ elseif style == "Rainbow" then
 		end
 	end
 
-	-- rate-limit update_self_chams — достаточно 20 раз/сек
+	-- rate-limit update_self_chams — 10 раз/сек, only when enabled
 	local _self_chams_acc = 0
 	cheat.utility.new_renderstepped(function(delta)
 		if esp_table.__loaded then
 			_self_chams_acc = _self_chams_acc + delta
-			if _self_chams_acc >= 0.05 then
+			if _self_chams_acc >= 0.1 then
 				_self_chams_acc = 0
-				pcall(esp_table.update_self_chams)
+				local sc = esp_table.settings.self_chams
+				if sc and sc.enabled then
+					pcall(esp_table.update_self_chams)
+				end
 			end
 		end
 	end)
@@ -10032,8 +9942,8 @@ do
 			pcall(function() cheat.EspLibrary.update_self_chams() end)
 		end})
 
-		espsec:Dropdown({Name = "Self chams style", Values = {"Ocean Gel", "Glow", "Flat", "ForceField", "Glass", "Pulse", "Rainbow"}, Value = "Ocean Gel", Flag = "esp_self_chams_style", Multi = false, Callback = function(value)
-			self_chams.style = value or "Ocean Gel"
+		espsec:Dropdown({Name = "Self chams style", Values = {"ForceField", "Flat", "Glass", "Glow", "Wireframe", "Pulse", "Rainbow"}, Value = "ForceField", Flag = "esp_self_chams_style", Multi = false, Callback = function(value)
+			self_chams.style = value or "ForceField"
 			pcall(function() cheat.EspLibrary.update_self_chams() end)
 		end})
 
@@ -10534,16 +10444,9 @@ do
 
 	local raksync, raksync_key, raksync_replicate_next = false, false, false
 
-	local main_wireframe = Instance.new("WireframeHandleAdornment")
-	main_wireframe.Parent = game:GetService("CoreGui").RobloxGui
-	main_wireframe.Adornee = workspace
-	main_wireframe.Color3 = Color3.new(1, 1, 1)
-	main_wireframe.Transparency = 0
-	main_wireframe.AlwaysOnTop = true
-	main_wireframe.CFrame = CFrame.new()
-	main_wireframe.Scale = Vector3.one
-	main_wireframe.Thickness = 1
-	main_wireframe.AdornCullingMode = Enum.AdornCullingMode.Automatic
+	-- DESYNC WIREFRAME DISABLED FOR PERFORMANCE
+	local main_wireframe = {Visible = false}
+	local function updateDesyncWireframe() end
 
 	do --if SWG_Note:find("alpha") then
 		local original_rate, original_bandwidth = getfflag("S2PhysicsSenderRate"), getfflag("PhysicsSenderMaxBandwidthBps")
@@ -10898,39 +10801,7 @@ do
 		return name == "Head" or name:find("Torso") or name:find("Leg") or name:find("Arm") or name:find("Hand") or name:find("Foot")
 	end
 
-	cheat.utility.new_renderstepped(LPH_NO_VIRTUALIZE(function(delta)
-		main_wireframe:Clear()
 
-		if not (desync_visualize) then return end
-		if not (desync_enabled and desync_enabled_key) then return end
-		if not (old_cframe and hrp_offset) then return end
-
-		local character = LocalPlayer.Character
-		if not (character) then return end
-
-		local parts = {}
-		local c = 0
-		for _, v in character:GetChildren() do
-			if v:IsA("BasePart") and isBodyPart(v.Name) then
-				c += 1
-				parts[c] = {v.CFrame, v.Size}
-			end
-		end
-		if c == 0 then return end
-
-		local points = {}
-		c = 0
-		for _, part in parts do
-			for _, vertex in VERTICES do
-				c += 1
-				points[c] = (old_cframe * hrp_offset):PointToWorldSpace(
-					old_cframe:PointToObjectSpace(part[1]:PointToWorldSpace(vertex * part[2] * 0.5))
-				) - workspace.WorldPivot.Position
-			end
-		end
-
-		main_wireframe:AddLines(points)
-	end))
 end
 
 do
