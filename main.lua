@@ -6333,10 +6333,14 @@ LPH_NO_VIRTUALIZE(function()
 		return name == "Head" or name:find("Torso") or name:find("Leg") or name:find("Arm") or name:find("Hand") or name:find("Foot")
 	end
 
+	-- Reads CFrame/Size directly off the parts so the caller no longer has to
+	-- allocate a {cframe,size} table per part every frame (that table churn was a
+	-- major GC source with the ESP enabled).
 	local function getBoundingBox(parts)
 		local min, max
-		for i, part in parts do
-			local cframe, size = part[1], part[2]
+		for _, part in parts do
+			local cframe = part.CFrame
+			local size = part.Size
 
 			min = _Vector3zeromin(min or cframe.Position, (cframe - size * 0.5).Position)
 			max = _Vector3zeromax(max or cframe.Position, (cframe + size * 0.5).Position)
@@ -6352,25 +6356,23 @@ LPH_NO_VIRTUALIZE(function()
 		return _Vector2new(screen.X, screen.Y), inBounds, screen.Z
 	end
 
-	local function calculateCorners(cframe, size)
-		local corners = table.create(#VERTICES)
-		for i, vertice in VERTICES do
-			corners[i] = worldToScreen((cframe + size * 0.5 * vertice).Position)
+	-- Reuses a caller-provided result table (out) so we don't allocate a new
+	-- corners table + result table every frame per player. Returns scalar
+	-- bounds via the out table to avoid extra Vector2 allocations downstream.
+	local function calculateCorners(cframe, size, out)
+		local minX, minY = math.huge, math.huge
+		local maxX, maxY = -math.huge, -math.huge
+		for i = 1, #VERTICES do
+			local vertice = VERTICES[i]
+			local screen = _WorldToViewportPoint(Camera, (cframe + size * 0.5 * vertice).Position)
+			local sx, sy = screen.X, screen.Y
+			if sx < minX then minX = sx end
+			if sy < minY then minY = sy end
+			if sx > maxX then maxX = sx end
+			if sy > maxY then maxY = sy end
 		end
-
-		local min = Camera.ViewportSize
-		local max = Vector2.zero
-		for _, corner in corners do
-			min = _Vector2zeromin(min, corner)
-			max = _Vector2zeromax(max, corner)
-		end
-		return {
-			corners = corners,
-			topLeft = _Vector2new(min.X, min.Y),
-			topRight = _Vector2new(max.X, min.Y),
-			bottomLeft = _Vector2new(min.X, max.Y),
-			bottomRight = _Vector2new(max.X, max.Y)
-		}
+		out.minX, out.minY, out.maxX, out.maxY = minX, minY, maxX, maxY
+		return out
 	end
 
 	local create_esp, destroy_esp;
@@ -7020,14 +7022,24 @@ elseif style == "Rainbow" then
 		plr.connections["character_removing"] = plr_instance.CharacterRemoving:Connect(character_removing)
 
 		plr.connections["render"] = cheat.utility.new_renderstepped(function(delta)
-			skeleton_tick += delta
-
-			if skeleton_tick > skeleton_rate then
-				main_wireframe:Clear()
-			end
-
+			-- When ESP is off, do as little as possible per player per frame.
+			-- (Previously main_wireframe:Clear() ran every frame for every player
+			-- even with ESP disabled, which cost FPS at idle.)
 			if not settings.enabled then
 				return plr:togglevis(false)
+			end
+
+			skeleton_tick += delta
+
+			if update_skeleton then
+				if skeleton_tick > skeleton_rate then
+					main_wireframe:Clear()
+				end
+				plr._skeleton_was_on = true
+			elseif plr._skeleton_was_on then
+				-- Skeleton just got disabled: clear once, then stop touching it.
+				main_wireframe:Clear()
+				plr._skeleton_was_on = false
 			end
 
 			if (settings.chams and (settings.chams_style == "Pulse" or settings.chams_style == "Rainbow" or settings.chams_style == "ForceField")) or settings.highlight then
@@ -7193,15 +7205,12 @@ elseif style == "Rainbow" then
 				if (plr._cached_parts_count or 0) <= 0 then
 					return plr:togglevis(false)
 				end
-				-- Переиспользуем таблицу кеша вместо создания новой каждый кадр
-				local cache = plr._bbox_cache or {}
-				plr._bbox_cache = cache
-				-- очищаем только изменённые ключи
-				for k in cache do cache[k] = nil end
-				for name, part in plr._cached_parts do
-					cache[name] = {part.CFrame, part.Size}
-				end
-				corners = calculateCorners(getBoundingBox(cache))
+				-- Read parts directly (no per-part {cf,size} table allocation) and
+				-- reuse a per-player scratch table for the projected bounds.
+				local cf, size = getBoundingBox(plr._cached_parts)
+				local out = plr._corners_out or {}
+				plr._corners_out = out
+				corners = calculateCorners(cf, size, out)
 			end
 
 			plr:togglevis(true)
@@ -7212,15 +7221,17 @@ elseif style == "Rainbow" then
 			end
 
 			do
-				local pos = corners.topLeft
-				local size = corners.bottomRight - corners.topLeft
-				main_holder.Position = UDim2.fromOffset(pos.X - gui_inset.X, pos.Y - gui_inset.Y)
-				main_holder.Size = UDim2.fromOffset(size.X, size.Y)
+				local minX, minY = corners.minX, corners.minY
+				main_holder.Position = UDim2.fromOffset(minX - gui_inset.X, minY - gui_inset.Y)
+				main_holder.Size = UDim2.fromOffset(corners.maxX - minX, corners.maxY - minY)
 			end
 
 			do
-				local pos = (corners.bottomLeft + corners.bottomRight) * 0.5
-				main_distance.Text = mathround(humanoid_distance) .. "m"
+				local d = mathround(humanoid_distance)
+				if plr._last_dist ~= d then
+					plr._last_dist = d
+					main_distance.Text = d .. "m"
+				end
 				if weapon_enabled then
 					local gun = get_gun(plr_instance, character, humanoid)
 					if gun then
@@ -7233,8 +7244,14 @@ elseif style == "Rainbow" then
 				end
 			end
 
-			main_health_text.Text = humanoid_health and tostring(mathfloor(humanoid_health)) or "???"
-			main_health_bar.Size = UDim2.fromScale(1, humanoid_health and (1 - humanoid_health / humanoid_max_health) or 1)
+			do
+				local hp = humanoid_health and mathfloor(humanoid_health) or nil
+				if plr._last_hp ~= hp then
+					plr._last_hp = hp
+					main_health_text.Text = hp and tostring(hp) or "???"
+					main_health_bar.Size = UDim2.fromScale(1, hp and (1 - humanoid_health / humanoid_max_health) or 1)
+				end
+			end
 
 			for i, v in registered_flags do
 				local show_flag, flag_text = v[2](plr_instance, character, humanoid)
@@ -7255,14 +7272,14 @@ elseif style == "Rainbow" then
 				local points = {}
 				local counter = 0
 
-				for part_name, info in cache do 
+				for part_name, part in plr._cached_parts do
 					local parent_part = skeleton_order[part_name]
-					local parent_info = parent_part and cache[parent_part]
-					if not (parent_info) then
+					local parent = parent_part and plr._cached_parts[parent_part]
+					if not (parent) then
 						continue
 					end
 
-					local part_pos, parent_pos = info[1], parent_info[1]
+					local part_pos, parent_pos = part.CFrame, parent.CFrame
 
 					points[counter + 1] = _VectorToObjectSpace(root_pos, part_pos.Position - root_pos.Position)
 					points[counter + 2] = _VectorToObjectSpace(root_pos, parent_pos.Position - root_pos.Position)
@@ -7944,6 +7961,28 @@ do
 			or model.PrimaryPart
 	end
 
+	-- Robust aim-part finder for NPCs. Many NPCs do not have a direct child named
+	-- exactly "Head"/"UpperTorso" (custom rigs, parts nested under sub-models, or
+	-- a humanoid head named differently). Old code did model:FindFirstChild(aimpart)
+	-- only at the top level, fell back to the root (low/center), and then a small
+	-- FOV often excluded the NPC -> "aim on NPC doesn't work". This searches
+	-- recursively and tries sensible alternatives.
+	local function aimbot_npc_aimpart(model, aimpart)
+		if not model then return nil end
+		-- 1) exact requested part (recursive)
+		local p = model:FindFirstChild(aimpart, true)
+		if p and p:IsA("BasePart") then return p end
+		-- 2) common head/torso names (recursive)
+		for _, name in {"Head", "UpperTorso", "Torso", "HumanoidRootPart"} do
+			local part = model:FindFirstChild(name, true)
+			if part and part:IsA("BasePart") then return part end
+		end
+		-- 3) humanoid's RootPart, then model root/primary
+		local hum = model:FindFirstChildOfClass("Humanoid")
+		if hum and hum.RootPart then return hum.RootPart end
+		return aimbot_npc_root(model)
+	end
+
 	local function aimbot_valid_npc(model)
 		if not (model and model.Parent and model:IsA("Model")) then return false end
 		if Players:GetPlayerFromCharacter(model) then return false end
@@ -7965,14 +8004,14 @@ do
 						_cached_npcs[model] = {
 							model = model,
 							proxy = {
-								Name = model.Name,
+								Name = "npc",
 								Character = model,
 								UserId = 0,
 								IsNPC = true,
 							}
 						}
 					else
-						_cached_npcs[model].proxy.Name = model.Name
+						_cached_npcs[model].proxy.Name = "npc"
 						_cached_npcs[model].proxy.Character = model
 					end
 				end
@@ -8112,7 +8151,8 @@ do
 
 				local humanoid = model:FindFirstChildOfClass("Humanoid")
 				local root = aimbot_npc_root(model)
-				local aim_part = model:FindFirstChild(aimpart) or root
+				-- Robust recursive aim-part lookup (was top-level only -> aim missed many NPCs)
+				local aim_part = aimbot_npc_aimpart(model, aimpart)
 				if not (aim_part and root) then continue end
 
 				if (dead_check) and humanoid and humanoid.Health <= 0 then
@@ -8125,7 +8165,7 @@ do
 				local position, onscreen = _WorldToViewportPoint(Camera, aim_part.Position)
 				local distance = (_Vector2new(position.X, position.Y) - mousepos).Magnitude
 				if onscreen and distance <= maximum_distance then
-					data.proxy.Name = model.Name
+					data.proxy.Name = "npc"
 					data.proxy.Character = model
 					plr_instance = data.proxy
 					ermm_part = aim_part
@@ -8291,6 +8331,13 @@ do
 	local fov_glow             = false
 	local fov_glow_color       = Library.Theme.accent
 	local fov_glow_alpha       = 0.960
+	-- Real-bloom controls (runtime-adjustable):
+	--  spread    = how far the glow bleeds out from the ring (px)
+	--  intensity = overall strength/opacity of the glow (0..1)
+	--  feather   = how soft the falloff is (higher = softer, longer tail)
+	local fov_glow_spread      = 55  -- fixed (slider removed)
+	local fov_glow_intensity   = 0.6
+	local fov_glow_feather     = 1.7
 	local fov_outline_color    = Color3.new(0, 0, 0)
 	local fov_outline_alpha    = 0.18
 	local fov_outline_thick    = 0.75
@@ -8586,6 +8633,15 @@ do
 			fov_glow_color = color.c
 		end})
 		fov_controls.glow = fov_glow_toggle
+		-- Glow spread is fixed at 55 (slider removed by request).
+		-- Overall strength/opacity of the glow.
+		fov_controls.glow_strength = chksec:Slider({Name = "Glow strength", Min = 0, Max = 100, Float = 1, Value = 60, Suffix = "%%", Callback = function(v)
+			fov_glow_intensity = v / 100
+		end, Flag = "fov_glow_strength"})
+		-- How soft the falloff is (higher = softer feather, more like real light).
+		fov_controls.glow_feather = chksec:Slider({Name = "Glow feather", Min = 0.5, Max = 5, Float = 0.1, Value = 1.7, Flag = "fov_glow_feather", Callback = function(v)
+			fov_glow_feather = v
+		end})
 		fov_controls.outline = chksec:Toggle({Name = "FOV outline", Value = false, Flag = "fov_outline_tog", Callback = function(bool)
 			fov_outline = bool
 		end})
@@ -8876,11 +8932,11 @@ do
 		fovGui.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 	end
 
-	-- FOV glow: оптимизировано — меньше слоёв, визуально то же самое
-	local GLOW_LAYERS           = 16  -- было 60 → 120 фреймов, теперь 32 фрейма
-	local GLOW_RADIUS_PX        = 20
-	local GLOW_INTENSITY        = 0.960
-	local GLOW_STROKE_THICKNESS = 3.5 -- толще чтобы компенсировать меньше слоёв
+	-- FOV glow: many THIN concentric rings for a smooth, real bloom-like feather.
+	-- Offset/transparency are computed per-frame from the runtime spread/intensity/
+	-- feather sliders, so each layer only stores its normalized position t (0..1).
+	local GLOW_LAYERS           = 110  -- many rings so a wide spread stays gapless (no visible edge)
+	local GLOW_STROKE_THICKNESS = 1.5  -- slightly wider lines (also closes tiny gaps)
 
 	-- создаём один Frame-кольцо с UICorner + UIStroke
 	local function createRingFrame(diameter, thickness, color, transparency)
@@ -8906,25 +8962,17 @@ do
 	local fovOutRing2   = nil  -- внутри
 	local fovGlowRings  = {}
 
-	-- glow слои — внешние + внутренние, плавное затухание
+	-- glow слои — внешние + внутренние. Каждый слой хранит только нормализованную
+	-- позицию t (0..1) и знак (наружу/внутрь). Реальные offset/прозрачность
+	-- считаются каждый кадр из ползунков spread/intensity/feather.
 	for i = 1, GLOW_LAYERS do
-		local t      = i / GLOW_LAYERS
-		-- Soft falloff. The last part is forced invisible so there is no visible final circle.
-		local smooth = t * t * (3 - 2 * t)
-		local alpha  = (1 - smooth) ^ 2.35
-		local transp = math.clamp(GLOW_INTENSITY + (1 - GLOW_INTENSITY) * (1 - alpha), 0, 1)
-		if t > 0.90 then
-			local edge = (t - 0.90) / 0.10
-			transp = math.clamp(transp + edge * edge * 0.08, 0, 1)
-		end
-		if t > 0.965 then transp = 1 end
-		local offset = t * GLOW_RADIUS_PX
-		local fo = createRingFrame(1, GLOW_STROKE_THICKNESS, Color3.new(1,1,1), transp)
+		local t  = i / GLOW_LAYERS
+		local fo = createRingFrame(1, GLOW_STROKE_THICKNESS, Color3.new(1,1,1), 1)
 		fo.Visible = false
-		fovGlowRings[#fovGlowRings+1] = {frame=fo, offset=offset, baseTransparency=transp, stroke=fo:FindFirstChildOfClass("UIStroke")}
-		local fi = createRingFrame(1, GLOW_STROKE_THICKNESS, Color3.new(1,1,1), transp)
+		fovGlowRings[#fovGlowRings+1] = {frame=fo, t=t, dir=1, stroke=fo:FindFirstChildOfClass("UIStroke")}
+		local fi = createRingFrame(1, GLOW_STROKE_THICKNESS, Color3.new(1,1,1), 1)
 		fi.Visible = false
-		fovGlowRings[#fovGlowRings+1] = {frame=fi, offset=-offset, baseTransparency=transp, stroke=fi:FindFirstChildOfClass("UIStroke")}
+		fovGlowRings[#fovGlowRings+1] = {frame=fi, t=t, dir=-1, stroke=fi:FindFirstChildOfClass("UIStroke")}
 	end
 
 	-- основное кольцо (тонкий лиловый как на скрине 2)
@@ -9018,18 +9066,42 @@ do
 			if _fov_os2 then _fov_os2.Color = fov_outline_color; _fov_os2.Thickness = outlineThickness; _fov_os2.Transparency = fov_outline_alpha end
 		end
 
-		-- glow
+		-- glow (real bloom-style feather, driven by spread/intensity/feather sliders)
 		local showGlow = fov_show and fov_glow
 		if showGlow then
+			local spread  = fov_glow_spread
+			local feather = math.max(0.05, fov_glow_feather)
+			local maxA    = math.clamp(fov_glow_intensity, 0, 1)
 			for _, g in ipairs(fovGlowRings) do
-				g.frame.Visible  = g.baseTransparency < 0.995
-				local d = math.max(2, diameter + g.offset * 2)
-				g.frame.Position = center
-				g.frame.Size     = UDim2.fromOffset(d, d)
-				local gs = g.stroke
-				if gs then
-					gs.Color = fov_glow_color
-					gs.Transparency = math.clamp(g.baseTransparency + (fov_glow_alpha - 0.960), 0, 1)
+				local t = g.t
+				-- Smooth exponential falloff: soft near the ring, fading out to the rim.
+				-- Higher feather = softer/longer tail (more like real light bloom).
+				local alpha = maxA * math.exp(-(t * feather) * (t * feather))
+				-- Soften the core: the very innermost rings (right at the FOV circle)
+				-- used to blast full intensity, which looked too bright. Ramp the
+				-- first ~12% up gradually instead of starting at full alpha.
+				if t < 0.12 then
+					alpha = alpha * (0.45 + 0.55 * (t / 0.12))
+				end
+				-- Long, gentle fade across the last 30% so the outer edge of the
+				-- glow blends to nothing — no visible ring where the layers stop.
+				if t > 0.70 then
+					local k = (t - 0.70) / 0.30
+					alpha = alpha * (1 - k * k)
+				end
+				local transp = math.clamp(1 - alpha, 0, 1)
+				if transp < 0.997 then
+					g.frame.Visible = true
+					local d = math.max(2, diameter + g.dir * t * spread * 2)
+					g.frame.Position = center
+					g.frame.Size     = UDim2.fromOffset(d, d)
+					local gs = g.stroke
+					if gs then
+						gs.Color = fov_glow_color
+						gs.Transparency = transp
+					end
+				else
+					g.frame.Visible = false
 				end
 			end
 			_fov_glow_was_on = true
@@ -10002,6 +10074,7 @@ local npc_esp_highlight = true
 local npc_esp_name = true
 local npc_esp_health = true
 local npc_esp_distance = true
+local npc_esp_max_distance = 1000  -- studs; NPCs farther than this are not drawn
 local npc_esp_color = Color3.fromRGB(255, 120, 120)
 local npc_esp_objects = {}
 local npc_esp_scan_acc = 0
@@ -10030,6 +10103,16 @@ local NPC_VERTICES = {
 
 local function npc_get_humanoid(model)
 	return model and model:FindFirstChildOfClass("Humanoid")
+end
+
+-- NPC font: reuse the SAME custom font the player ESP uses (TahomaXP), so NPC
+-- ESP text looks identical to player ESP instead of Enum.Font.Code.
+local NPC_FONT = (Fonts and Fonts.Get and Fonts.Get("TahomaXP")) or nil
+
+-- All NPC labels just show "npc". Model names are often GUIDs/hashes (which
+-- showed up as garbage symbols), and the user wants a single uniform label.
+local function npc_get_name(model, humanoid)
+	return "npc"
 end
 
 local function npc_get_root(model)
@@ -10073,7 +10156,12 @@ local function npc_make_label(parent, name)
 	label.TextStrokeColor3 = Color3.new(0, 0, 0)
 	label.TextStrokeTransparency = 0
 	label.TextSize = 12
-	label.Font = Enum.Font.Code
+	-- Match the player ESP font (TahomaXP) instead of Enum.Font.Code.
+	if NPC_FONT then
+		label.FontFace = NPC_FONT
+	else
+		label.Font = Enum.Font.Code
+	end
 	label.ZIndex = 12
 	label.Visible = false
 	return label
@@ -10115,7 +10203,9 @@ local function npc_create(model)
 	local boxOutlineStroke = Instance.new("UIStroke")
 	boxOutlineStroke.Parent = boxOutline
 	boxOutlineStroke.Color = Color3.new(0, 0, 0)
-	boxOutlineStroke.Thickness = 3
+	boxOutlineStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	boxOutlineStroke.LineJoinMode = Enum.LineJoinMode.Miter
+	boxOutlineStroke.Thickness = 1
 	boxOutlineStroke.Transparency = 0
 
 	local box = Instance.new("Frame")
@@ -10128,17 +10218,27 @@ local function npc_create(model)
 	local boxStroke = Instance.new("UIStroke")
 	boxStroke.Parent = box
 	boxStroke.Color = npc_esp_color
+	boxStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	boxStroke.LineJoinMode = Enum.LineJoinMode.Miter
 	boxStroke.Thickness = 1
 	boxStroke.Transparency = 0
 
+	-- Health bar: thin vertical bar on the LEFT of the box, identical layout to
+	-- the player ESP (outline frame at offset -5, fill grows from bottom).
 	local hpBack = Instance.new("Frame")
 	hpBack.Name = "HealthBack"
 	hpBack.Parent = holder
 	hpBack.BackgroundColor3 = Color3.new(0, 0, 0)
 	hpBack.BorderSizePixel = 0
-	hpBack.Position = UDim2.fromOffset(-6, 0)
+	hpBack.Position = UDim2.new(0, -5, 0, 0)
 	hpBack.Size = UDim2.new(0, 3, 1, 0)
 	hpBack.ZIndex = 10
+	local hpBackStroke = Instance.new("UIStroke")
+	hpBackStroke.Parent = hpBack
+	hpBackStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	hpBackStroke.LineJoinMode = Enum.LineJoinMode.Miter
+	hpBackStroke.Color = Color3.new(0, 0, 0)
+	hpBackStroke.Thickness = 1
 
 	local hpFill = Instance.new("Frame")
 	hpFill.Name = "HealthFill"
@@ -10150,22 +10250,26 @@ local function npc_create(model)
 	hpFill.Size = UDim2.fromScale(1, 1)
 	hpFill.ZIndex = 11
 
+	-- Name: centered above the box (same offsets as player ESP main_name).
 	local nameLabel = npc_make_label(holder, "Name")
-	nameLabel.AnchorPoint = Vector2.new(0.5, 1)
-	nameLabel.Position = UDim2.new(0.5, 0, 0, -2)
-	nameLabel.Size = UDim2.new(1, 60, 0, 14)
+	nameLabel.AnchorPoint = Vector2.new(0.5, 0)
+	nameLabel.Position = UDim2.new(0.5, 0, 0, -17)
+	nameLabel.Size = UDim2.new(0, 10000, 0, 13)
+	nameLabel.TextXAlignment = Enum.TextXAlignment.Center
 
+	-- Distance: centered below the box (same as player ESP main_distance).
 	local distanceLabel = npc_make_label(holder, "Distance")
 	distanceLabel.AnchorPoint = Vector2.new(0.5, 0)
-	distanceLabel.Position = UDim2.new(0.5, 0, 1, 2)
-	distanceLabel.Size = UDim2.new(1, 60, 0, 14)
+	distanceLabel.Position = UDim2.new(0.5, 0, 1, 1)
+	distanceLabel.Size = UDim2.new(0, 10000, 0, 13)
+	distanceLabel.TextXAlignment = Enum.TextXAlignment.Center
 
+	-- Health text: to the left of the HP bar, right-aligned (like player ESP).
 	local healthLabel = npc_make_label(holder, "Health")
 	healthLabel.AnchorPoint = Vector2.new(1, 0)
-	healthLabel.Position = UDim2.new(0, -8, 1, -12)
+	healthLabel.Position = UDim2.new(0, -8, 0, 0)
 	healthLabel.Size = UDim2.fromOffset(45, 12)
 	healthLabel.TextXAlignment = Enum.TextXAlignment.Right
-	healthLabel.TextSize = 10
 
 	local highlight = Instance.new("Highlight")
 	highlight.Name = "NPC_Highlight"
@@ -10191,48 +10295,97 @@ local function npc_create(model)
 	return obj
 end
 
-local function npc_project_box(cf, size)
-	local min2, max2 = nil, nil
-	for _, v in NPC_VERTICES do
-		local world = (cf * CFrame.new(size.X * 0.5 * v.X, size.Y * 0.5 * v.Y, size.Z * 0.5 * v.Z)).Position
+-- Projects the 8 corners of a local-space box (offset CFrame + half-size in studs)
+-- and returns the screen-space min position + size. Uses scalar min/max instead
+-- of allocating Vector2 objects per corner, which matters a lot when this runs
+-- every frame for many NPCs while the camera moves.
+local _mathmin, _mathmax, _mathabs = math.min, math.max, math.abs
+local function npc_project_box(cf, hx, hy, hz)
+	local minX, minY = math.huge, math.huge
+	local maxX, maxY = -math.huge, -math.huge
+	local any = false
+	for i = 1, 8 do
+		local v = NPC_VERTICES[i]
+		-- cf is the box CFrame in world space; offset by half-size along each axis
+		local world = (cf * CFrame.new(hx * v.X, hy * v.Y, hz * v.Z)).Position
 		local screen = _WorldToViewportPoint(Camera, world)
 		if screen.Z > 0 then
-			local p = Vector2.new(screen.X, screen.Y)
-			min2 = min2 and Vector2.new(math.min(min2.X, p.X), math.min(min2.Y, p.Y)) or p
-			max2 = max2 and Vector2.new(math.max(max2.X, p.X), math.max(max2.Y, p.Y)) or p
+			any = true
+			local sx, sy = screen.X, screen.Y
+			if sx < minX then minX = sx end
+			if sy < minY then minY = sy end
+			if sx > maxX then maxX = sx end
+			if sy > maxY then maxY = sy end
 		end
 	end
-	if not (min2 and max2) then return nil end
-	local boxSize = max2 - min2
+	if not any then return nil end
+	local min2 = Vector2.new(minX, minY)
+	local boxSize = Vector2.new(maxX - minX, maxY - minY)
 	if boxSize.X < 2 or boxSize.Y < 2 then return nil end
 	return min2, boxSize
 end
 
-local function npc_get_screen_box(model)
-	local root = npc_get_root(model)
+-- Computes (and caches) the NPC's bounding box in LOCAL space relative to its
+-- root part. model:GetBoundingBox() walks the whole part tree, so we do it only
+-- on the periodic scan (once per second), NOT every frame. Per frame we just
+-- rebuild the world box from the (cheap) live root.CFrame and the cached offset.
+local function npc_cache_box(model, obj, root)
+	root = root or npc_get_root(model)
+	if not root then
+		obj.boxOffset = nil
+		return
+	end
+	local ok, cf, size = pcall(model.GetBoundingBox, model)
+	if ok and cf and size and size.Magnitude > 0 then
+		-- Store box relative to root so it follows the NPC without re-querying.
+		obj.boxOffset = root.CFrame:ToObjectSpace(cf)
+		obj.boxHalfX = size.X * 0.5
+		obj.boxHalfY = size.Y * 0.5
+		obj.boxHalfZ = size.Z * 0.5
+		obj.boxValid = true
+	else
+		obj.boxValid = false
+	end
+end
+
+local function npc_get_screen_box(model, obj, root)
+	root = root or npc_get_root(model)
 	if not (Camera and root) then return nil end
 
 	-- Hide 2D elements when NPC is offscreen. Highlight can still show through walls.
 	local rootScreen, rootOnScreen = _WorldToViewportPoint(Camera, root.Position)
 	if not rootOnScreen or rootScreen.Z <= 0 then return nil end
 
-	-- Use Roblox bounding box instead of only R15/R6 part names. Many NPCs use custom
-	-- meshes/hitboxes, so the old body-part filter returned nil and elements disappeared.
-	local ok, cf, size = pcall(function()
-		return model:GetBoundingBox()
-	end)
-	if ok and cf and size and size.Magnitude > 0 then
-		local pos, boxSize = npc_project_box(cf, size)
+	-- Fast path: use the cached local-space bounding box (computed on scan) and the
+	-- live root CFrame. No GetBoundingBox()/pcall per frame.
+	if obj and obj.boxValid and obj.boxOffset then
+		local cf = root.CFrame * obj.boxOffset
+		local pos, boxSize = npc_project_box(cf, obj.boxHalfX, obj.boxHalfY, obj.boxHalfZ)
 		if pos and boxSize then
 			return pos, boxSize
 		end
 	end
 
-	-- Last fallback for weird NPCs: draw a distance-scaled box around the root.
-	local distance = math.max((Camera.CFrame.Position - root.Position).Magnitude, 1)
-	local h = math.clamp(4200 / distance, 28, 190)
-	local w = h * 0.55
-	return Vector2.new(rootScreen.X - w / 2, rootScreen.Y - h / 2), Vector2.new(w, h)
+	-- Fallback for weird NPCs: build a box from a proper perspective projection of
+	-- an assumed humanoid size so it scales with distance correctly.
+	local assumedHeight = 5      -- studs (typical humanoid)
+	local assumedWidth  = 2.5    -- studs
+
+	local rootPos = root.Position
+	local topScreen    = _WorldToViewportPoint(Camera, rootPos + Vector3.new(0, assumedHeight * 0.5, 0))
+	local bottomScreen = _WorldToViewportPoint(Camera, rootPos - Vector3.new(0, assumedHeight * 0.5, 0))
+
+	-- both points must be in front of the camera
+	if topScreen.Z <= 0 or bottomScreen.Z <= 0 then return nil end
+
+	local h = _mathabs(bottomScreen.Y - topScreen.Y)
+	-- width scales with the same projection factor as the height
+	local w = h * (assumedWidth / assumedHeight)
+	if h < 2 or w < 2 then return nil end
+
+	local cx = (topScreen.X + bottomScreen.X) * 0.5
+	local cy = (topScreen.Y + bottomScreen.Y) * 0.5
+	return Vector2.new(cx - w / 2, cy - h / 2), Vector2.new(w, h)
 end
 
 local function npc_update(model, obj)
@@ -10241,45 +10394,110 @@ local function npc_update(model, obj)
 		return
 	end
 
-	local humanoid = npc_get_humanoid(model)
-	local root = npc_get_root(model)
-	local distance = Camera and mathfloor((Camera.CFrame.Position - root.Position).Magnitude) or 0
+	local humanoid = obj.humanoid
+	if not (humanoid and humanoid.Parent) then
+		humanoid = npc_get_humanoid(model)
+		obj.humanoid = humanoid
+	end
+	local root = obj.root
+	if not (root and root.Parent) then
+		root = npc_get_root(model)
+		obj.root = root
+	end
+	if not (humanoid and root) then
+		obj.holder.Visible = false
+		return
+	end
 
+	local distance = mathfloor((Camera.CFrame.Position - root.Position).Magnitude)
+
+	-- Distance limit: don't draw NPCs farther than npc_esp_max_distance studs.
+	if not npc_esp_enabled or distance > npc_esp_max_distance then
+		obj.holder.Visible = false
+		if obj._hlEnabled ~= false then
+			obj.highlight.Enabled = false
+			obj._hlEnabled = false
+		end
+		return
+	end
+
+	-- Highlight: only touch properties when they actually change (writing GUI
+	-- properties every frame for every NPC is part of what caused the lag).
 	obj.highlight.Adornee = model
-	obj.highlight.Enabled = npc_esp_enabled and npc_esp_highlight
-	obj.highlight.FillColor = npc_esp_color
-	obj.highlight.OutlineColor = npc_esp_color
+	local hlEnabled = npc_esp_enabled and npc_esp_highlight
+	if obj._hlEnabled ~= hlEnabled then
+		obj.highlight.Enabled = hlEnabled
+		obj._hlEnabled = hlEnabled
+	end
+	if obj._color ~= npc_esp_color then
+		obj.highlight.FillColor = npc_esp_color
+		obj.highlight.OutlineColor = npc_esp_color
+		obj.boxStroke.Color = npc_esp_color
+		obj.nameLabel.TextColor3 = npc_esp_color
+		obj.distanceLabel.TextColor3 = npc_esp_color
+		obj.healthLabel.TextColor3 = npc_esp_color
+		obj._color = npc_esp_color
+	end
 
-	local pos, size = npc_get_screen_box(model)
+	local pos, size = npc_get_screen_box(model, obj, root)
 	if not (npc_esp_enabled and pos and size) then
 		obj.holder.Visible = false
 		return
 	end
 
 	obj.holder.Visible = true
-	obj.holder.Position = UDim2.fromOffset(pos.X - GuiInset.X, pos.Y - GuiInset.Y)
+	-- npc_esp_gui.IgnoreGuiInset = true, so coordinates from WorldToViewportPoint
+	-- are already correct for this GUI. Subtracting the GUI inset shifted every
+	-- box upward by ~36px ("ESP выше"). Use the projected coords directly.
+	obj.holder.Position = UDim2.fromOffset(pos.X, pos.Y)
 	obj.holder.Size = UDim2.fromOffset(size.X, size.Y)
 
-	obj.box.Visible = npc_esp_box
-	obj.boxOutline.Visible = npc_esp_box
-	obj.boxStroke.Color = npc_esp_color
+	if obj._boxVis ~= npc_esp_box then
+		obj.box.Visible = npc_esp_box
+		obj.boxOutline.Visible = npc_esp_box
+		obj._boxVis = npc_esp_box
+	end
 
+	-- Health: only update the fill/color when the value meaningfully changes.
 	local hpRatio = math.clamp(humanoid.Health / math.max(humanoid.MaxHealth, 1), 0, 1)
-	obj.hpBack.Visible = npc_esp_health
-	obj.hpFill.Size = UDim2.fromScale(1, hpRatio)
-	obj.hpFill.BackgroundColor3 = Color3.fromRGB(math.floor(255 * (1 - hpRatio)), math.floor(220 * hpRatio), 0)
+	if obj._hpVis ~= npc_esp_health then
+		obj.hpBack.Visible = npc_esp_health
+		obj.healthLabel.Visible = npc_esp_health
+		obj._hpVis = npc_esp_health
+	end
+	if obj._hpRatio == nil or _mathabs(obj._hpRatio - hpRatio) > 0.004 then
+		obj.hpFill.Size = UDim2.fromScale(1, hpRatio)
+		obj.hpFill.BackgroundColor3 = Color3.fromRGB(math.floor(255 * (1 - hpRatio)), math.floor(220 * hpRatio), 0)
+		obj.healthLabel.Text = tostring(mathfloor(humanoid.Health))
+		obj._hpRatio = hpRatio
+	end
 
-	obj.nameLabel.Visible = npc_esp_name
-	obj.nameLabel.TextColor3 = npc_esp_color
-	obj.nameLabel.Text = model.Name
+	-- Name: cached on scan, almost never changes; just toggle visibility here.
+	if obj._nameVis ~= npc_esp_name then
+		obj.nameLabel.Visible = npc_esp_name
+		obj._nameVis = npc_esp_name
+	end
 
-	obj.distanceLabel.Visible = npc_esp_distance
-	obj.distanceLabel.TextColor3 = npc_esp_color
-	obj.distanceLabel.Text = tostring(distance) .. "m"
+	if obj._distVis ~= npc_esp_distance then
+		obj.distanceLabel.Visible = npc_esp_distance
+		obj._distVis = npc_esp_distance
+	end
+	if obj._dist ~= distance then
+		obj.distanceLabel.Text = distance .. "m"
+		obj._dist = distance
+	end
+end
 
-	obj.healthLabel.Visible = npc_esp_health
-	obj.healthLabel.TextColor3 = npc_esp_color
-	obj.healthLabel.Text = tostring(mathfloor(humanoid.Health))
+-- Refreshes the cached root/humanoid/name/bounding-box for an NPC. Called only on
+-- the periodic scan (once per second), so the expensive GetBoundingBox()/name
+-- resolution does NOT run every frame.
+local function npc_cache_data(model, obj)
+	local humanoid = npc_get_humanoid(model)
+	local root = npc_get_root(model)
+	obj.humanoid = humanoid
+	obj.root = root
+	obj.nameLabel.Text = npc_get_name(model, humanoid)
+	npc_cache_box(model, obj, root)
 end
 
 local function npc_scan()
@@ -10291,7 +10509,9 @@ local function npc_scan()
 			local model = inst.Parent
 			if npc_is_valid_model(model) then
 				seen[model] = true
-				npc_create(model)
+				local obj = npc_create(model)
+				-- (Re)cache heavy data on scan, not per frame.
+				npc_cache_data(model, obj)
 			end
 		end
 	end
@@ -10478,6 +10698,9 @@ do
 			espsec:Toggle({Name = "NPC distance", Value = true, Flag = "npc_esp_distance", Callback = function(bool)
 				npc_esp_distance = bool
 				npc_refresh()
+			end})
+			espsec:Slider({Name = "NPC max distance", Min = 0, Max = 5000, Float = 50, Value = 1000, Flag = "npc_esp_max_distance", Callback = function(int)
+				npc_esp_max_distance = int
 			end})
 		end
 
@@ -10676,12 +10899,13 @@ do
 		Flag = "Watermark",
 		Value = true,
 		Callback = function(bool)
-			local wm = rawget(ui.window, "Watermark")
+			-- Watermark/KeybindList live on the inner library (ui.window.__new),
+			-- not on the outer wrapper. Using ui.window directly made wm == nil,
+			-- so SetVisibility never ran and they never hid.
+			local inner = ui.window and ui.window.__new
+			local wm = inner and rawget(inner, "Watermark")
 			if wm and wm.SetVisibility then
 				pcall(wm.SetVisibility, wm, bool)
-			end
-			if ui.window._setGlow then
-				pcall(ui.window._setGlow, bool)
 			end
 		end
 	})
@@ -10691,12 +10915,10 @@ do
 		Flag = "Keybind list",
 		Value = true,
 		Callback = function(bool)
-			local kl = rawget(ui.window, "KeybindList")
+			local inner = ui.window and ui.window.__new
+			local kl = inner and rawget(inner, "KeybindList")
 			if kl and kl.SetVisibility then
 				pcall(kl.SetVisibility, kl, bool)
-			end
-			if ui.window._setGlow then
-				pcall(ui.window._setGlow, bool)
 			end
 		end
 	})
