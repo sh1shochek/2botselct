@@ -7897,6 +7897,7 @@ Library.Notification( string.format(
 
 cheat.player_list = {}
 local hit_detection = function(...)end
+local aimbot_target_npcs = false
 local get_closest_target = function(...)end
 do
 	local player_list = cheat.player_list
@@ -7928,6 +7929,62 @@ do
 			if _cached_players[i] == p then table.remove(_cached_players, i); break end
 		end
 	end)
+
+
+	-- NPC cache for aimbot. Scans workspace once per second and reuses results
+	-- so targeting NPCs does not call Workspace:GetDescendants() every frame.
+	local _cached_npcs = {}
+	local _last_npc_scan = 0
+
+	local function aimbot_npc_root(model)
+		if not model then return nil end
+		return model:FindFirstChild("HumanoidRootPart")
+			or model:FindFirstChild("UpperTorso")
+			or model:FindFirstChild("Torso")
+			or model.PrimaryPart
+	end
+
+	local function aimbot_valid_npc(model)
+		if not (model and model.Parent and model:IsA("Model")) then return false end
+		if Players:GetPlayerFromCharacter(model) then return false end
+		local hum = model:FindFirstChildOfClass("Humanoid")
+		local root = aimbot_npc_root(model)
+		if not (hum and root and root:IsA("BasePart")) then return false end
+		if hum.Health <= 0 then return false end
+		return true
+	end
+
+	local function rescan_aimbot_npcs()
+		local seen = {}
+		for _, inst in workspace:GetDescendants() do
+			if inst:IsA("Humanoid") then
+				local model = inst.Parent
+				if aimbot_valid_npc(model) then
+					seen[model] = true
+					if not _cached_npcs[model] then
+						_cached_npcs[model] = {
+							model = model,
+							proxy = {
+								Name = model.Name,
+								Character = model,
+								UserId = 0,
+								IsNPC = true,
+							}
+						}
+					else
+						_cached_npcs[model].proxy.Name = model.Name
+						_cached_npcs[model].proxy.Character = model
+					end
+				end
+			end
+		end
+
+		for model in _cached_npcs do
+			if not seen[model] or not aimbot_valid_npc(model) then
+				_cached_npcs[model] = nil
+			end
+		end
+	end
 
 	local add_player = function(player)
 		local character, humanoid
@@ -8039,6 +8096,44 @@ do
 				end
 			end
 		end)()
+
+		if aimbot_target_npcs then
+			local now = tick()
+			if now - _last_npc_scan >= 1 then
+				_last_npc_scan = now
+				rescan_aimbot_npcs()
+			end
+
+			for model, data in _cached_npcs do
+				if not aimbot_valid_npc(model) then
+					_cached_npcs[model] = nil
+					continue
+				end
+
+				local humanoid = model:FindFirstChildOfClass("Humanoid")
+				local root = aimbot_npc_root(model)
+				local aim_part = model:FindFirstChild(aimpart) or root
+				if not (aim_part and root) then continue end
+
+				if (dead_check) and humanoid and humanoid.Health <= 0 then
+					continue
+				end
+				if (dist_check) and ((campos - aim_part.Position).Magnitude > max_distance) then
+					continue
+				end
+
+				local position, onscreen = _WorldToViewportPoint(Camera, aim_part.Position)
+				local distance = (_Vector2new(position.X, position.Y) - mousepos).Magnitude
+				if onscreen and distance <= maximum_distance then
+					data.proxy.Name = model.Name
+					data.proxy.Character = model
+					plr_instance = data.proxy
+					ermm_part = aim_part
+					collider = root
+					maximum_distance = distance
+				end
+			end
+		end
 		return ermm_part, plr_instance, collider
 	end
 end
@@ -8213,6 +8308,10 @@ do
 		end})
 		aimsec:Dropdown({Name = "Aim mode", Values = {"Camera", "Mouse", "Silent"}, Value = "Camera", Flag = "aimbot_mode", Multi = false, Callback = function(str)
 			aimbot_mode = str
+		end})
+		aimsec:Toggle({Name = "Target NPCs", Value = false, Flag = "aimbot_target_npcs", Callback = function(bool)
+			aimbot_target_npcs = bool
+			target_part, target_player, target_collider = nil, nil, nil
 		end})
 		aimsec:Slider({Name = "Aim smoothness", Min = 0.01, Max = 1, Float = 0.01, Value = 0.7, Flag = "aimbot_smoothness", Suffix = "%s\194\176" --[[degree symbol (°)]], Callback = function(int)
 			aimbot_smoothness = int
@@ -9219,7 +9318,10 @@ do
 		tiSetText(tiVUser, target_player.Name)
 		tiAva.Visible = true
 
-		if lastAva ~= target_player then
+		if type(target_player) == "table" and target_player.IsNPC then
+			lastAva = target_player
+			tiAva.Image = ""
+		elseif lastAva ~= target_player then
 			lastAva = target_player; tiAva.Image = ""
 			task.spawn(function()
 				local ok, img = pcall(function()
@@ -9828,7 +9930,402 @@ do
 end
 
 local aspect_ratio, aspect_ratio_x, aspect_ratio_y = false, 1, 1
+local aspect_base_cframe = nil
+local aspect_writing = false
+
+local function aspect_clean_cframe(cf)
+	local pos = cf.Position
+	local right = cf.RightVector
+	local up = cf.UpVector
+	local back = -cf.LookVector
+
+	-- CFrame with aspect-scale has non-unit Right/Up vectors. If that scaled CFrame is
+	-- used as a base again, the scale is applied repeatedly and the image starts to
+	-- snap between stretched/normal states. Normalize the basis before applying aspect.
+	if right.Magnitude < 1e-6 or up.Magnitude < 1e-6 or back.Magnitude < 1e-6 then
+		return cf
+	end
+
+	return CFrame.fromMatrix(pos, right.Unit, up.Unit, back.Unit)
+end
+
+local function aspect_apply_cframe(cf)
+	cf = aspect_clean_cframe(cf)
+	return cf * _CFramenew(
+		0, 0, 0,
+		aspect_ratio_x, 0, 0,
+		0, aspect_ratio_y, 0,
+		0, 0, 1
+	)
+end
+
+local function aspect_set_visual_cframe(cf)
+	if not Camera then return end
+	aspect_base_cframe = aspect_clean_cframe(cf or aspect_base_cframe or Camera.CFrame)
+	aspect_writing = true
+	Camera.CFrame = aspect_apply_cframe(aspect_base_cframe)
+	aspect_writing = false
+end
+
+local function aspect_refresh()
+	if not Camera then return end
+
+	if aspect_ratio then
+		aspect_set_visual_cframe(aspect_base_cframe or Camera.CFrame)
+	elseif aspect_base_cframe then
+		local cf = aspect_base_cframe
+		aspect_base_cframe = nil
+		aspect_writing = true
+		Camera.CFrame = cf
+		aspect_writing = false
+	end
+end
+
+-- CurrentCamera can be recreated by Roblox/game scripts. Keep the cached camera and
+-- WorldToViewportPoint method valid, otherwise aspect/FOV/ESP may randomly stop or flicker.
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+	if workspace.CurrentCamera and workspace.CurrentCamera ~= Camera then
+		Camera = workspace.CurrentCamera
+		_WorldToViewportPoint = Camera.WorldToViewportPoint
+		aspect_base_cframe = nil
+		task.defer(aspect_refresh)
+	end
+end)
+
 local thirdperson, thirdperson_key, thirdperson_distance = false, false, 10
+
+
+-- ---- NPC ESP / WH (player-like boxes) ----
+local npc_esp_enabled = false
+local npc_esp_box = true
+local npc_esp_highlight = true
+local npc_esp_name = true
+local npc_esp_health = true
+local npc_esp_distance = true
+local npc_esp_color = Color3.fromRGB(255, 120, 120)
+local npc_esp_objects = {}
+local npc_esp_scan_acc = 0
+
+local npc_esp_gui = Instance.new("ScreenGui")
+npc_esp_gui.Name = "FrostNpcEspGui"
+npc_esp_gui.ResetOnSpawn = false
+npc_esp_gui.IgnoreGuiInset = true
+npc_esp_gui.DisplayOrder = 7
+npc_esp_gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function()
+	npc_esp_gui.Parent = (cloneref and cloneref(game:GetService("CoreGui")) or game:GetService("CoreGui"))
+end)
+if not npc_esp_gui.Parent then
+	npc_esp_gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local npc_esp_container = Instance.new("Folder")
+npc_esp_container.Name = "FrostNpcEsp"
+npc_esp_container.Parent = npc_esp_gui
+
+local NPC_VERTICES = {
+	Vector3.new(-1, -1, -1), Vector3.new(-1, 1, -1), Vector3.new(-1, 1, 1), Vector3.new(-1, -1, 1),
+	Vector3.new(1, -1, -1), Vector3.new(1, 1, -1), Vector3.new(1, 1, 1), Vector3.new(1, -1, 1)
+}
+
+local function npc_get_humanoid(model)
+	return model and model:FindFirstChildOfClass("Humanoid")
+end
+
+local function npc_get_root(model)
+	if not model then return nil end
+	return model:FindFirstChild("HumanoidRootPart")
+		or model:FindFirstChild("UpperTorso")
+		or model:FindFirstChild("Torso")
+		or model.PrimaryPart
+end
+
+local function npc_is_body_part(part)
+	if not (part and part:IsA("BasePart")) then return false end
+	local name = part.Name
+	if name == "HumanoidRootPart" then return false end
+	if part:FindFirstAncestorOfClass("Tool") then return false end
+	return name == "Head"
+		or name:find("Torso")
+		or name:find("Leg")
+		or name:find("Arm")
+		or name:find("Hand")
+		or name:find("Foot")
+end
+
+local function npc_is_valid_model(model)
+	if not (model and model.Parent and model:IsA("Model")) then return false end
+	if Players:GetPlayerFromCharacter(model) then return false end
+	local humanoid = npc_get_humanoid(model)
+	local root = npc_get_root(model)
+	if not (humanoid and root and root:IsA("BasePart")) then return false end
+	if humanoid.Health <= 0 then return false end
+	return true
+end
+
+local function npc_make_label(parent, name)
+	local label = Instance.new("TextLabel")
+	label.Name = name
+	label.Parent = parent
+	label.BackgroundTransparency = 1
+	label.BorderSizePixel = 0
+	label.TextColor3 = npc_esp_color
+	label.TextStrokeColor3 = Color3.new(0, 0, 0)
+	label.TextStrokeTransparency = 0
+	label.TextSize = 12
+	label.Font = Enum.Font.Code
+	label.ZIndex = 12
+	label.Visible = false
+	return label
+end
+
+local function npc_destroy(model)
+	local obj = npc_esp_objects[model]
+	if not obj then return end
+	if obj.highlight then obj.highlight:Destroy() end
+	if obj.holder then obj.holder:Destroy() end
+	npc_esp_objects[model] = nil
+end
+
+local function npc_destroy_all()
+	for model in npc_esp_objects do
+		npc_destroy(model)
+	end
+end
+
+local function npc_create(model)
+	local obj = npc_esp_objects[model]
+	if obj then return obj end
+
+	local holder = Instance.new("Frame")
+	holder.Name = "NPC_Holder"
+	holder.Parent = npc_esp_container
+	holder.BackgroundTransparency = 1
+	holder.BorderSizePixel = 0
+	holder.Visible = false
+	holder.ZIndex = 10
+
+	local boxOutline = Instance.new("Frame")
+	boxOutline.Name = "BoxOutline"
+	boxOutline.Parent = holder
+	boxOutline.BackgroundTransparency = 1
+	boxOutline.BorderSizePixel = 0
+	boxOutline.Size = UDim2.fromScale(1, 1)
+	boxOutline.ZIndex = 9
+	local boxOutlineStroke = Instance.new("UIStroke")
+	boxOutlineStroke.Parent = boxOutline
+	boxOutlineStroke.Color = Color3.new(0, 0, 0)
+	boxOutlineStroke.Thickness = 3
+	boxOutlineStroke.Transparency = 0
+
+	local box = Instance.new("Frame")
+	box.Name = "Box"
+	box.Parent = holder
+	box.BackgroundTransparency = 1
+	box.BorderSizePixel = 0
+	box.Size = UDim2.fromScale(1, 1)
+	box.ZIndex = 10
+	local boxStroke = Instance.new("UIStroke")
+	boxStroke.Parent = box
+	boxStroke.Color = npc_esp_color
+	boxStroke.Thickness = 1
+	boxStroke.Transparency = 0
+
+	local hpBack = Instance.new("Frame")
+	hpBack.Name = "HealthBack"
+	hpBack.Parent = holder
+	hpBack.BackgroundColor3 = Color3.new(0, 0, 0)
+	hpBack.BorderSizePixel = 0
+	hpBack.Position = UDim2.fromOffset(-6, 0)
+	hpBack.Size = UDim2.new(0, 3, 1, 0)
+	hpBack.ZIndex = 10
+
+	local hpFill = Instance.new("Frame")
+	hpFill.Name = "HealthFill"
+	hpFill.Parent = hpBack
+	hpFill.BackgroundColor3 = Color3.fromRGB(80, 220, 80)
+	hpFill.BorderSizePixel = 0
+	hpFill.AnchorPoint = Vector2.new(0, 1)
+	hpFill.Position = UDim2.new(0, 0, 1, 0)
+	hpFill.Size = UDim2.fromScale(1, 1)
+	hpFill.ZIndex = 11
+
+	local nameLabel = npc_make_label(holder, "Name")
+	nameLabel.AnchorPoint = Vector2.new(0.5, 1)
+	nameLabel.Position = UDim2.new(0.5, 0, 0, -2)
+	nameLabel.Size = UDim2.new(1, 60, 0, 14)
+
+	local distanceLabel = npc_make_label(holder, "Distance")
+	distanceLabel.AnchorPoint = Vector2.new(0.5, 0)
+	distanceLabel.Position = UDim2.new(0.5, 0, 1, 2)
+	distanceLabel.Size = UDim2.new(1, 60, 0, 14)
+
+	local healthLabel = npc_make_label(holder, "Health")
+	healthLabel.AnchorPoint = Vector2.new(1, 0)
+	healthLabel.Position = UDim2.new(0, -8, 1, -12)
+	healthLabel.Size = UDim2.fromOffset(45, 12)
+	healthLabel.TextXAlignment = Enum.TextXAlignment.Right
+	healthLabel.TextSize = 10
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "NPC_Highlight"
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillTransparency = 0.72
+	highlight.OutlineTransparency = 0
+	highlight.Enabled = false
+	highlight.Parent = npc_esp_container
+
+	obj = {
+		holder = holder,
+		boxOutline = boxOutline,
+		box = box,
+		boxStroke = boxStroke,
+		hpBack = hpBack,
+		hpFill = hpFill,
+		nameLabel = nameLabel,
+		distanceLabel = distanceLabel,
+		healthLabel = healthLabel,
+		highlight = highlight,
+	}
+	npc_esp_objects[model] = obj
+	return obj
+end
+
+local function npc_project_box(cf, size)
+	local min2, max2 = nil, nil
+	for _, v in NPC_VERTICES do
+		local world = (cf * CFrame.new(size.X * 0.5 * v.X, size.Y * 0.5 * v.Y, size.Z * 0.5 * v.Z)).Position
+		local screen = _WorldToViewportPoint(Camera, world)
+		if screen.Z > 0 then
+			local p = Vector2.new(screen.X, screen.Y)
+			min2 = min2 and Vector2.new(math.min(min2.X, p.X), math.min(min2.Y, p.Y)) or p
+			max2 = max2 and Vector2.new(math.max(max2.X, p.X), math.max(max2.Y, p.Y)) or p
+		end
+	end
+	if not (min2 and max2) then return nil end
+	local boxSize = max2 - min2
+	if boxSize.X < 2 or boxSize.Y < 2 then return nil end
+	return min2, boxSize
+end
+
+local function npc_get_screen_box(model)
+	local root = npc_get_root(model)
+	if not (Camera and root) then return nil end
+
+	-- Hide 2D elements when NPC is offscreen. Highlight can still show through walls.
+	local rootScreen, rootOnScreen = _WorldToViewportPoint(Camera, root.Position)
+	if not rootOnScreen or rootScreen.Z <= 0 then return nil end
+
+	-- Use Roblox bounding box instead of only R15/R6 part names. Many NPCs use custom
+	-- meshes/hitboxes, so the old body-part filter returned nil and elements disappeared.
+	local ok, cf, size = pcall(function()
+		return model:GetBoundingBox()
+	end)
+	if ok and cf and size and size.Magnitude > 0 then
+		local pos, boxSize = npc_project_box(cf, size)
+		if pos and boxSize then
+			return pos, boxSize
+		end
+	end
+
+	-- Last fallback for weird NPCs: draw a distance-scaled box around the root.
+	local distance = math.max((Camera.CFrame.Position - root.Position).Magnitude, 1)
+	local h = math.clamp(4200 / distance, 28, 190)
+	local w = h * 0.55
+	return Vector2.new(rootScreen.X - w / 2, rootScreen.Y - h / 2), Vector2.new(w, h)
+end
+
+local function npc_update(model, obj)
+	if not npc_is_valid_model(model) then
+		npc_destroy(model)
+		return
+	end
+
+	local humanoid = npc_get_humanoid(model)
+	local root = npc_get_root(model)
+	local distance = Camera and mathfloor((Camera.CFrame.Position - root.Position).Magnitude) or 0
+
+	obj.highlight.Adornee = model
+	obj.highlight.Enabled = npc_esp_enabled and npc_esp_highlight
+	obj.highlight.FillColor = npc_esp_color
+	obj.highlight.OutlineColor = npc_esp_color
+
+	local pos, size = npc_get_screen_box(model)
+	if not (npc_esp_enabled and pos and size) then
+		obj.holder.Visible = false
+		return
+	end
+
+	obj.holder.Visible = true
+	obj.holder.Position = UDim2.fromOffset(pos.X - GuiInset.X, pos.Y - GuiInset.Y)
+	obj.holder.Size = UDim2.fromOffset(size.X, size.Y)
+
+	obj.box.Visible = npc_esp_box
+	obj.boxOutline.Visible = npc_esp_box
+	obj.boxStroke.Color = npc_esp_color
+
+	local hpRatio = math.clamp(humanoid.Health / math.max(humanoid.MaxHealth, 1), 0, 1)
+	obj.hpBack.Visible = npc_esp_health
+	obj.hpFill.Size = UDim2.fromScale(1, hpRatio)
+	obj.hpFill.BackgroundColor3 = Color3.fromRGB(math.floor(255 * (1 - hpRatio)), math.floor(220 * hpRatio), 0)
+
+	obj.nameLabel.Visible = npc_esp_name
+	obj.nameLabel.TextColor3 = npc_esp_color
+	obj.nameLabel.Text = model.Name
+
+	obj.distanceLabel.Visible = npc_esp_distance
+	obj.distanceLabel.TextColor3 = npc_esp_color
+	obj.distanceLabel.Text = tostring(distance) .. "m"
+
+	obj.healthLabel.Visible = npc_esp_health
+	obj.healthLabel.TextColor3 = npc_esp_color
+	obj.healthLabel.Text = tostring(mathfloor(humanoid.Health))
+end
+
+local function npc_scan()
+	if not npc_esp_enabled then return end
+
+	local seen = {}
+	for _, inst in workspace:GetDescendants() do
+		if inst:IsA("Humanoid") then
+			local model = inst.Parent
+			if npc_is_valid_model(model) then
+				seen[model] = true
+				npc_create(model)
+			end
+		end
+	end
+
+	for model in npc_esp_objects do
+		if not seen[model] or not npc_is_valid_model(model) then
+			npc_destroy(model)
+		end
+	end
+end
+
+local function npc_refresh()
+	if not npc_esp_enabled then
+		npc_destroy_all()
+		return
+	end
+	npc_scan()
+	for model, obj in npc_esp_objects do
+		npc_update(model, obj)
+	end
+end
+
+cheat.utility.new_renderstepped(function(delta)
+	if not npc_esp_enabled then return end
+	npc_esp_scan_acc += delta
+	if npc_esp_scan_acc >= 1 then
+		npc_esp_scan_acc = 0
+		npc_scan()
+	end
+	for model, obj in npc_esp_objects do
+		npc_update(model, obj)
+	end
+end)
+
 do
 	local espsec = ui.sections.player_esp
 	local setsec = ui.sections.esp_settings
@@ -9843,6 +10340,7 @@ do
 			enemy_sets.enabled = bool
 			cheat.EspLibrary.icaca()
 		end})
+
 
 		do
 			local toggle = espsec:Toggle({Name = "Box", Value = false, Flag = "esp_box", Callback = function(bool)
@@ -9951,6 +10449,38 @@ do
 			self_chams.glow_factor = int
 			pcall(function() cheat.EspLibrary.update_self_chams() end)
 		end})
+
+		do
+			local npcToggle = espsec:Toggle({Name = "NPC ESP", Value = false, Flag = "npc_esp_enabled", Callback = function(bool)
+				npc_esp_enabled = bool
+				npc_refresh()
+			end})
+			npcToggle:Colorpicker({Name = "NPC color", Value = Color3.fromRGB(255, 120, 120), Usealpha = false, Flag = "npc_esp_color", Callback = function(color)
+				npc_esp_color = color.c
+				npc_refresh()
+			end})
+			espsec:Toggle({Name = "NPC box", Value = true, Flag = "npc_esp_box", Callback = function(bool)
+				npc_esp_box = bool
+				npc_refresh()
+			end})
+			espsec:Toggle({Name = "NPC highlight", Value = true, Flag = "npc_esp_highlight", Callback = function(bool)
+				npc_esp_highlight = bool
+				npc_refresh()
+			end})
+			espsec:Toggle({Name = "NPC name", Value = true, Flag = "npc_esp_name", Callback = function(bool)
+				npc_esp_name = bool
+				npc_refresh()
+			end})
+			espsec:Toggle({Name = "NPC health", Value = true, Flag = "npc_esp_health", Callback = function(bool)
+				npc_esp_health = bool
+				npc_refresh()
+			end})
+			espsec:Toggle({Name = "NPC distance", Value = true, Flag = "npc_esp_distance", Callback = function(bool)
+				npc_esp_distance = bool
+				npc_refresh()
+			end})
+		end
+
 
 	end
 	do
@@ -10081,12 +10611,15 @@ do
 		end})
 		mscsec:Toggle({Name = "Aspect ratio", Value = false, Flag = "view_aspect_ratio", Callback = function(bool)
 			aspect_ratio = bool
+			aspect_refresh()
 		end})
-		mscsec:Slider({Name = "Aspect X", Min = 0.01, Max = 1.1, Float = 0.01, Value = 1, Flag = "aspect_ratio_x", Callback = function(int)
+		mscsec:Slider({Name = "Aspect X", Min = 0.01, Max = 2, Float = 0.01, Value = 1, Flag = "aspect_ratio_x", Callback = function(int)
 			aspect_ratio_x = int
+			aspect_refresh()
 		end})
-		mscsec:Slider({Name = "Aspect Y", Min = 0.01, Max = 1.1, Float = 0.01, Value = 1, Flag = "aspect_ratio_y", Callback = function(int)
+		mscsec:Slider({Name = "Aspect Y", Min = 0.01, Max = 2, Float = 0.01, Value = 1, Flag = "aspect_ratio_y", Callback = function(int)
 			aspect_ratio_y = int
+			aspect_refresh()
 		end})
 		mscsec:Toggle({Name = "Thirdperson", Value = false, Flag = "view_thirdperson", Callback = function(bool)
 			thirdperson = bool
@@ -11100,17 +11633,17 @@ ui.window.Init()
 -- Глобальный флаг Remove Recoil — устанавливается из Gun Mods do-блока выше
 -- (recoil_locked_cf и gun_remove_recoil объявлены там через upvalue)
 local __newindex; __newindex = hookmetamethod(game, "__newindex", newcclosure(LPH_NO_VIRTUALIZE(function(self, idx, val)
-	if self == Camera and idx == "CFrame" then
-		if thirdperson and thirdperson_key then
-			val = val + (val.LookVector * -thirdperson_distance)
-		end
-		if aspect_ratio then
-			val = val * _CFramenew(
-				0, 0, 0,
-				aspect_ratio_x, 0, 0,
-				0, aspect_ratio_y, 0,
-				0, 0, 1
-			)
+	if self == Camera and (idx == "CFrame" or idx == "CoordinateFrame") then
+		if not aspect_writing then
+			if thirdperson and thirdperson_key then
+				val = val + (val.LookVector * -thirdperson_distance)
+			end
+			if aspect_ratio then
+				aspect_base_cframe = aspect_clean_cframe(val)
+				val = aspect_apply_cframe(aspect_base_cframe)
+			else
+				aspect_base_cframe = nil
+			end
 		end
 		-- Remove Recoil больше не трогает Camera.CFrame, чтобы не блокировать вращение камеры.
 	end
@@ -11121,6 +11654,13 @@ local __index; __index = hookmetamethod(game, '__index', newcclosure(LPH_NO_VIRT
 	-- Быстрый выход: 99.9% вызовов отсеиваются здесь (дешевле checkcaller)
 	if key ~= "CFrame" and key ~= "CoordinateFrame" and key ~= "Hit" and key ~= "Target" then
 		return __index(self, key)
+	end
+
+	-- If aspect is active, the real Camera.CFrame contains a scale matrix only for
+	-- rendering. Return the clean/original CFrame to every reader so camera scripts
+	-- do not base their next update on an already stretched matrix.
+	if self == Camera and (key == "CFrame" or key == "CoordinateFrame") and aspect_ratio and aspect_base_cframe then
+		return aspect_base_cframe
 	end
 
 	if checkcaller() then return __index(self, key) end
