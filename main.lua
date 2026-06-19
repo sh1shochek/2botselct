@@ -6236,7 +6236,7 @@ LPH_NO_VIRTUALIZE(function()
 					dead_check = false,
 					dist_check = false,
 					max_distance = 1000,
-					skeleton_rate = 1e-10,
+					skeleton_rate = 0,
 					gradient_spin = false,
 					gradient_speed = 360 -- degrees per second, formula: tick() % 1 * speed
 				},
@@ -6318,6 +6318,16 @@ LPH_NO_VIRTUALIZE(function()
 
 		["LowerTorso"] = "UpperTorso",
 		["UpperTorso"] = "Head"
+	}
+	-- R6 rigs use different part names; without this the skeleton was empty for
+	-- every R6 character (the R15 names above never matched), which is why the
+	-- skeleton "did not work" in many games.
+	local skeleton_order_r6 = {
+		["Left Arm"]  = "Torso",
+		["Right Arm"] = "Torso",
+		["Left Leg"]  = "Torso",
+		["Right Leg"] = "Torso",
+		["Torso"]     = "Head",
 	}
 	local esp = {}
 	esp.create_obj = function(new, args, tbl)
@@ -6732,7 +6742,7 @@ LPH_NO_VIRTUALIZE(function()
 
 		-- god forgive me
 		local team_check, dead_check, dist_check = main_settings.team_check, main_settings.dead_check, main_settings.dist_check
-		local skeleton_rate = main_settings.skeleton_rate <= 0 and 1e-10 or main_settings.skeleton_rate
+		local skeleton_rate = (main_settings.skeleton_rate and main_settings.skeleton_rate > 0) and main_settings.skeleton_rate or 0
 		local max_distance, update_skeleton = main_settings.max_distance, settings.skeleton
 		local weapon_enabled, box_rotation = settings.weapon, settings.box_rotation
 
@@ -6755,16 +6765,32 @@ LPH_NO_VIRTUALIZE(function()
 			)
 		end
 
-		local function setChamShading(chamObject, preferred)
-			pcall(function()
-				if preferred == "XRayShaded" then
-					chamObject.Shading = Enum.AdornShading.XRayShaded
-				elseif preferred == "AlwaysOnTop" then
-					local ok = pcall(function() chamObject.Shading = Enum.AdornShading.AlwaysOnTop end)
-					if not ok then chamObject.Shading = Enum.AdornShading.XRayShaded end
-				end
-			end)
+		-- Shading rarely changes per object, and the AlwaysOnTop enum isn't always
+		-- available. Resolve the enum value ONCE (not via pcall every frame) and only
+		-- write Shading when it actually changes for that object.
+		local _ADORN_XRAY = Enum.AdornShading.XRayShaded
+		local _ADORN_TOP do
+			local ok, v = pcall(function() return Enum.AdornShading.AlwaysOnTop end)
+			_ADORN_TOP = (ok and v) or _ADORN_XRAY
 		end
+		local _shading_cache = setmetatable({}, {__mode = "k"})
+		local function setChamShading(chamObject, preferred)
+			local want = (preferred == "AlwaysOnTop") and _ADORN_TOP or _ADORN_XRAY
+			if _shading_cache[chamObject] == want then return end
+			_shading_cache[chamObject] = want
+			pcall(function() chamObject.Shading = want end)
+		end
+
+		-- Animated styles need a per-frame refresh; static ones can be written once
+		-- and then skipped until something actually changes.
+		local function cham_style_is_animated(style)
+			return style == "Pulse" or style == "Rainbow" or style == "ForceField"
+		end
+
+		-- Per-cham cache of last-applied values, so we don't re-write GUI/adornment
+		-- properties (Color3/Transparency/AlwaysOnTop/ZIndex/Size) every frame when
+		-- nothing changed. Writing unchanged engine properties is the main CPU cost.
+		local _cham_cache = setmetatable({}, {__mode = "k"})
 
 		local function apply_cham_style(chamObject, part)
 			if not chamObject then return end
@@ -6832,11 +6858,24 @@ elseif style == "Rainbow" then
 				sizeMul = 1
 			end
 
-			chamObject.Color3 = color
-			chamObject.Transparency = transparency
-			chamObject.AlwaysOnTop = alwaysOnTop
-			chamObject.ZIndex = zindex
-			if part then chamObject.Size = part.Size * sizeMul end
+			-- Only write properties that actually changed (avoids redundant engine
+			-- writes every frame, which was a big CPU cost when chams are visible).
+			local c = _cham_cache[chamObject]
+			if not c then c = {}; _cham_cache[chamObject] = c end
+
+			if c.color ~= color then chamObject.Color3 = color; c.color = color end
+			if c.transparency ~= transparency then chamObject.Transparency = transparency; c.transparency = transparency end
+			if c.alwaysOnTop ~= alwaysOnTop then chamObject.AlwaysOnTop = alwaysOnTop; c.alwaysOnTop = alwaysOnTop end
+			if c.zindex ~= zindex then chamObject.ZIndex = zindex; c.zindex = zindex end
+			if part then
+				-- part.Size changes only when the character rig changes; compare the
+				-- final size vector cheaply via its components.
+				local sx, sy, sz = part.Size.X * sizeMul, part.Size.Y * sizeMul, part.Size.Z * sizeMul
+				if c.sx ~= sx or c.sy ~= sy or c.sz ~= sz then
+					chamObject.Size = Vector3.new(sx, sy, sz)
+					c.sx, c.sy, c.sz = sx, sy, sz
+				end
+			end
 			setChamShading(chamObject, shadingMode)
 		end
 
@@ -6871,7 +6910,7 @@ elseif style == "Rainbow" then
 
 		function plr:forceupdate()
 			team_check, dead_check, dist_check = main_settings.team_check, main_settings.dead_check, main_settings.dist_check
-			skeleton_rate = main_settings.skeleton_rate <= 0 and 1e-10 or main_settings.skeleton_rate
+			skeleton_rate = (main_settings.skeleton_rate and main_settings.skeleton_rate > 0) and main_settings.skeleton_rate or 0
 			max_distance, update_skeleton = main_settings.max_distance, settings.skeleton
 			weapon_enabled, box_rotation = settings.weapon, settings.box_rotation
 
@@ -7032,9 +7071,6 @@ elseif style == "Rainbow" then
 			skeleton_tick += delta
 
 			if update_skeleton then
-				if skeleton_tick > skeleton_rate then
-					main_wireframe:Clear()
-				end
 				plr._skeleton_was_on = true
 			elseif plr._skeleton_was_on then
 				-- Skeleton just got disabled: clear once, then stop touching it.
@@ -7042,9 +7078,13 @@ elseif style == "Rainbow" then
 				plr._skeleton_was_on = false
 			end
 
-			if (settings.chams and (settings.chams_style == "Pulse" or settings.chams_style == "Rainbow" or settings.chams_style == "ForceField")) or settings.highlight then
+			-- Only re-apply cham styling every frame for ANIMATED styles. Static
+			-- styles (Glow/Flat/Glass) are written once when set/visibility changes,
+			-- so looping all body parts every frame here was wasted work. The model
+			-- highlight is handled separately by apply_model_highlight (no per-part
+			-- loop needed), so it no longer forces this loop either.
+			if settings.chams and cham_style_is_animated(settings.chams_style) then
 				for part, cham in chams_table do
-					apply_highlight_style(cham.outline, part, setvis_cache)
 					apply_cham_style(cham.cham, part)
 				end
 			end
@@ -7216,8 +7256,16 @@ elseif style == "Rainbow" then
 			plr:togglevis(true)
 
 			do
-				main_holder.Rotation = 0
-				main_box_color.Rotation = box_rotation + (gradient_spin and tick() * gradient_speed % 360 or 0)
+				-- main_holder.Rotation is always 0; only set it once.
+				if not plr._rot0 then main_holder.Rotation = 0; plr._rot0 = true end
+				-- Box gradient rotation only needs updating when spin is enabled
+				-- (otherwise it's a constant and re-writing it every frame is waste).
+				if gradient_spin then
+					main_box_color.Rotation = box_rotation + (tick() * gradient_speed % 360)
+				elseif plr._last_box_rot ~= box_rotation then
+					main_box_color.Rotation = box_rotation
+					plr._last_box_rot = box_rotation
+				end
 			end
 
 			do
@@ -7264,30 +7312,37 @@ elseif style == "Rainbow" then
 				if flag_text then flag.Text = flag_text end
 			end
 
-			if update_skeleton and skeleton_tick > skeleton_rate then
-				skeleton_tick = skeleton_tick % skeleton_rate
-				local root_pos = root.CFrame
+			-- rate == 0 means "update every frame"; otherwise throttle by time.
+			if update_skeleton and (skeleton_rate <= 0 or skeleton_tick >= skeleton_rate) then
+				if skeleton_rate > 0 then skeleton_tick = 0 end
+
+				local root_cf = root.CFrame
 				main_wireframe.Adornee = root
+				-- Always rebuild from scratch so old lines don't linger/stack.
+				main_wireframe:Clear()
+
+				-- Pick the bone map that matches this rig (R15 default, R6 fallback).
+				local order = skeleton_order
+				if not plr._cached_parts["UpperTorso"] and plr._cached_parts["Torso"] then
+					order = skeleton_order_r6
+				end
 
 				local points = {}
 				local counter = 0
-
 				for part_name, part in plr._cached_parts do
-					local parent_part = skeleton_order[part_name]
-					local parent = parent_part and plr._cached_parts[parent_part]
-					if not (parent) then
-						continue
+					local parent_name = order[part_name]
+					local parent = parent_name and plr._cached_parts[parent_name]
+					if parent then
+						-- Points are relative to the Adornee (root) center.
+						points[counter + 1] = _VectorToObjectSpace(root_cf, part.Position - root_cf.Position)
+						points[counter + 2] = _VectorToObjectSpace(root_cf, parent.Position - root_cf.Position)
+						counter += 2
 					end
-
-					local part_pos, parent_pos = part.CFrame, parent.CFrame
-
-					points[counter + 1] = _VectorToObjectSpace(root_pos, part_pos.Position - root_pos.Position)
-					points[counter + 2] = _VectorToObjectSpace(root_pos, parent_pos.Position - root_pos.Position)
-
-					counter += 2
 				end
 
-				main_wireframe:AddLines(points)
+				if counter > 0 then
+					main_wireframe:AddLines(points)
+				end
 			end
 		end)
 
@@ -7916,6 +7971,38 @@ cheat.player_list = {}
 local hit_detection = function(...)end
 local aimbot_target_npcs = false
 local get_closest_target = function(...)end
+
+-- ===== Aim part groups =====
+-- Each menu option maps to a list of candidate part names (R15 + R6). The
+-- resolver returns ONE concrete name per call; for limb groups and "Random"
+-- it picks randomly, so e.g. "Arms" hits a random arm part and "Random" hits
+-- any random body part. get_closest_target then looks that part up on the
+-- character (falling back to the root if it's missing on a given rig).
+local AIM_PART_GROUPS = {
+	["Head"]    = { "Head" },
+	["Body"]    = { "UpperTorso", "LowerTorso", "Torso", "HumanoidRootPart" },
+	["Torso"]   = { "UpperTorso", "LowerTorso", "Torso" },
+	["Arms"]    = { "LeftUpperArm", "LeftLowerArm", "LeftHand",
+	                "RightUpperArm", "RightLowerArm", "RightHand",
+	                "Left Arm", "Right Arm" },
+	["Legs"]    = { "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+	                "RightUpperLeg", "RightLowerLeg", "RightFoot",
+	                "Left Leg", "Right Leg" },
+	["Random"]  = { "Head", "UpperTorso", "LowerTorso", "Torso", "HumanoidRootPart",
+	                "LeftUpperArm", "LeftLowerArm", "LeftHand",
+	                "RightUpperArm", "RightLowerArm", "RightHand",
+	                "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+	                "RightUpperLeg", "RightLowerLeg", "RightFoot",
+	                "Left Arm", "Right Arm", "Left Leg", "Right Leg" },
+}
+-- Resolve the configured aim-part selection (aimbot_part) into a concrete part name.
+function aimbot_resolve_part(sel)
+	sel = sel or "Head"
+	local group = AIM_PART_GROUPS[sel]
+	if not group then return sel end          -- raw part name passed through
+	if #group == 1 then return group[1] end
+	return group[mathrandom(1, #group)]
+end
 do
 	local player_list = cheat.player_list
 	local esp_table = cheat.EspLibrary
@@ -8315,6 +8402,56 @@ do
 	local aimbot_enabled, aimbot_enabled_key, aimbot_part, aimbot_smoothness = false, false, "Head", 0.7
 	aimbot_mode = "Mouse"  -- используем глобальный aimbot_mode (читается из __namecall хука)
 	local aimbot_team_check, aimbot_dead_check, aimbot_dist_check, aimbot_max_distance = false, false, false, 600
+
+	-- ===== Auto fire (RemoteEvent based) =====
+	-- Does NOT click the mouse, so it can't trigger menu/GUI buttons. Instead it
+	-- replays the game's own "fire" RemoteEvent. The remote+args are captured by
+	-- the __namecall hook the first time you shoot manually after pressing
+	-- "Detect fire remote". After that, Auto fire just :FireServer()s it directly.
+	local auto_fire, auto_fire_key = false, false
+	local auto_fire_delay = 0.05        -- seconds between shots
+	local auto_fire_require_visible = true
+	local _auto_fire_last = 0
+	-- Shared with the __namecall hook (which lives at file scope) via getgenv.
+	getgenv().__af_detecting = getgenv().__af_detecting or false
+	getgenv().__af_remote    = getgenv().__af_remote or nil   -- the captured Instance
+	getgenv().__af_method    = getgenv().__af_method or nil    -- "FireServer" / "fireServer"
+	getgenv().__af_args      = getgenv().__af_args or nil      -- captured argument table
+
+	-- Reused raycast params for the optional visibility check (no per-shot alloc).
+	local _af_vis_params = RaycastParams.new()
+	_af_vis_params.FilterType = Enum.RaycastFilterType.Exclude
+
+	-- Replays the captured fire remote directly to the server. No mouse, no GUI.
+	local function auto_fire_click()
+		local remote = getgenv().__af_remote
+		local method = getgenv().__af_method
+		local args   = getgenv().__af_args
+		if not (remote and method) then return end
+		pcall(function()
+			if args then
+				remote[method](remote, table.unpack(args))
+			else
+				remote[method](remote)
+			end
+		end)
+	end
+
+	-- True if target_part is not occluded by walls (so we only fire when we'd hit).
+	local function auto_fire_target_visible()
+		if not (target_part and target_part.Parent) then return false end
+		local origin = Camera.CFrame.Position
+		local dir = target_part.Position - origin
+		local filter = {}
+		if LocalPlayer.Character then table.insert(filter, LocalPlayer.Character) end
+		if target_collider and target_collider.Parent then
+			local model = target_collider:FindFirstAncestorOfClass("Model")
+			if model then table.insert(filter, model) end
+		end
+		_af_vis_params.FilterDescendantsInstances = filter
+		local hit = workspace:Raycast(origin, dir, _af_vis_params)
+		return hit == nil
+	end
 	local fov_show, fov_color, fov_outline, fov_size = false, Color3.fromRGB(200, 170, 255), false, 100
 
 	-- hm_* переменные вынесены выше как shared state (видны обоим do-блокам)
@@ -8350,7 +8487,7 @@ do
 		end}):Keybind({Name = "Aimbot", Mode = "Hold", Key = Enum.KeyCode.E, Value = false, Flag = "aimbot_enabled_keybind", Callback = function(bool)
 			aimbot_enabled_key = bool
 		end})
-		aimsec:Dropdown({Name = "Hitpart", Values = {"Head", "UpperTorso"}, Value = "Head", Flag = "aimbot_hitpart", Multi = false, Callback = function(str)
+		aimsec:Dropdown({Name = "Hitpart", Values = {"Head", "Body", "Torso", "Arms", "Legs", "Random"}, Value = "Head", Flag = "aimbot_hitpart", Multi = false, Callback = function(str)
 			aimbot_part = str
 		end})
 		aimsec:Dropdown({Name = "Aim mode", Values = {"Camera", "Mouse", "Silent"}, Value = "Camera", Flag = "aimbot_mode", Multi = false, Callback = function(str)
@@ -8362,6 +8499,43 @@ do
 		end})
 		aimsec:Slider({Name = "Aim smoothness", Min = 0.01, Max = 1, Float = 0.01, Value = 0.7, Flag = "aimbot_smoothness", Suffix = "%s\194\176" --[[degree symbol (°)]], Callback = function(int)
 			aimbot_smoothness = int
+		end})
+
+		-- ===== Auto fire =====
+		aimsec:Toggle({Name = "Auto fire", Value = false, Flag = "auto_fire", Callback = function(bool)
+			auto_fire = bool
+		end}):Keybind({Name = "Auto fire", Mode = "Hold", Key = Enum.KeyCode.E, Value = false, Flag = "auto_fire_key", Callback = function(bool)
+			auto_fire_key = bool
+		end})
+		aimsec:Slider({Name = "Auto fire delay", Min = 0, Max = 500, Float = 5, Value = 50, Suffix = "%sms", Flag = "auto_fire_delay", Callback = function(int)
+			auto_fire_delay = int / 1000
+		end})
+		aimsec:Toggle({Name = "Auto fire only visible", Value = true, Flag = "auto_fire_require_visible", Callback = function(bool)
+			auto_fire_require_visible = bool
+		end})
+		-- Detect the game's fire RemoteEvent: arm capture, then shoot once manually.
+		aimsec:Button({Name = "Detect fire remote", Callback = function()
+			getgenv().__af_remote = nil
+			getgenv().__af_method = nil
+			getgenv().__af_args   = nil
+			getgenv().__af_detecting = true
+			Library.Notification("Detecting... fire your weapon ONCE manually.", 6, Color3.fromRGB(255, 200, 80))
+			-- Auto-disarm after 8s if nothing was captured.
+			task.delay(8, function()
+				if getgenv().__af_detecting then
+					getgenv().__af_detecting = false
+					if not getgenv().__af_remote then
+						Library.Notification("No fire remote detected. Try again.", 4, Color3.fromRGB(255, 90, 90))
+					end
+				end
+			end)
+		end})
+		aimsec:Button({Name = "Clear fire remote", Callback = function()
+			getgenv().__af_remote = nil
+			getgenv().__af_method = nil
+			getgenv().__af_args   = nil
+			getgenv().__af_detecting = false
+			Library.Notification("Fire remote cleared.", 3)
 		end})
 	end
 	do
@@ -9006,7 +9180,7 @@ do
 				local new_fov_size = (viewportsize.X * (fov_size / Camera.FieldOfView)) / 2
 				target_part, target_player, target_collider = get_closest_target(
 					new_fov_size,
-					aimbot_part or "Head",
+					aimbot_resolve_part(aimbot_part),
 					aimbot_team_check,
 					aimbot_dead_check,
 					aimbot_dist_check,
@@ -9122,6 +9296,19 @@ do
 				Camera.CFrame = Camera.CFrame:Lerp(CFrame.lookAt(Camera.CFrame.Position, new_pos), aimbot_smoothness)
 			end
 			-- Silent: мышка НЕ двигается (только custom crosshair приклеивается)
+		end
+
+		-- ===== Auto fire =====
+		-- Replays the captured fire RemoteEvent (no mouse click) while the key is
+		-- held and a valid target exists. Works alongside any aim mode.
+		if auto_fire and auto_fire_key and target_part and target_collider then
+			local now = tick()
+			if now - _auto_fire_last >= auto_fire_delay then
+				if (not auto_fire_require_visible) or auto_fire_target_visible() then
+					_auto_fire_last = now
+					auto_fire_click()
+				end
+			end
 		end
 	end))
 end
@@ -10423,7 +10610,10 @@ local function npc_update(model, obj)
 
 	-- Highlight: only touch properties when they actually change (writing GUI
 	-- properties every frame for every NPC is part of what caused the lag).
-	obj.highlight.Adornee = model
+	if obj._adornee ~= model then
+		obj.highlight.Adornee = model
+		obj._adornee = model
+	end
 	local hlEnabled = npc_esp_enabled and npc_esp_highlight
 	if obj._hlEnabled ~= hlEnabled then
 		obj.highlight.Enabled = hlEnabled
@@ -11926,6 +12116,22 @@ local __namecall; __namecall = hookmetamethod(game, "__namecall", newcclosure(LP
 	if checkcaller() then return __namecall(self, ...) end
 	local args = {...}
 	local method = getnamecallmethod()
+
+	-- ===== Auto fire: capture the game's fire RemoteEvent =====
+	-- While "Detect fire remote" is armed, record the first FireServer the game
+	-- sends when YOU shoot manually. Auto fire then replays this exact remote+args
+	-- (no mouse click -> can't trigger menu/GUI).
+	if getgenv().__af_detecting and (method == "FireServer" or method == "fireServer")
+		and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
+		getgenv().__af_remote = self
+		getgenv().__af_method = method
+		-- shallow-copy args so later mutations/gc don't affect the saved call
+		local saved = {}
+		for i = 1, select("#", ...) do saved[i] = args[i] end
+		getgenv().__af_args = saved
+		getgenv().__af_detecting = false
+		-- (no return here: let the real shot go through normally)
+	end
 	-- silent aim: работает когда выбран режим Silent и метод включён
 	if silent_methods[method] and aimbot_mode == "Silent" then
 		local hitpart = target_part  -- атомарное чтение upvalue
