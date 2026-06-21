@@ -1,0 +1,561 @@
+local SERVER_URL = "tech"
+local GUILD_ID = "tech"
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local CoreGui = (cloneref and cloneref(game:GetService("CoreGui"))) or game:GetService("CoreGui")
+local lp = Players.LocalPlayer
+local env = (getgenv and getgenv()) or _G
+
+-- [[ UTILS ]]
+local function urlEncode(s)
+	return tostring(s):gsub("[^%w%-_%.~]", function(c)
+		return string.format("%%%02X", string.byte(c))
+	end)
+end
+
+local function trim(s)
+	return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function getInjectedKey()
+	local key = rawget(env, "script_key") or rawget(env, "FROST_KEY")
+	key = trim(key)
+	if #key > 5 then return key end
+	return nil
+end
+
+local function getHWID()
+	local hwid = ""
+	local device = ""
+	pcall(function() hwid = gethwid() end)
+	pcall(function() device = game:GetService("RbxAnalyticsService"):GetClientId() end)
+	if hwid and #tostring(hwid) > 0 then return tostring(hwid) end
+	if device and #tostring(device) > 0 then return tostring(device) end
+	return tostring(lp.UserId) .. "_" .. tostring(game.PlaceId)
+end
+
+local SAVE_FILE = "frost_key.txt"
+
+local function loadSavedKey()
+	local ok, data = pcall(readfile, SAVE_FILE)
+	if ok and data and #data > 5 then
+		return trim(data)
+	end
+	return nil
+end
+
+local function saveKey(key)
+	if key and #key > 0 then
+		pcall(writefile, SAVE_FILE, key)
+	end
+end
+
+local function clearKey()
+	pcall(delfile, SAVE_FILE)
+end
+
+-- [[ SERVER API ]]
+local _session = nil
+local _licenseUid = nil
+
+local function applyAuthData(key, data)
+	if type(data) ~= "table" then return end
+	if data.session then _session = data.session end
+	_licenseUid = tonumber(data.license_uid or data.licenseUid or _licenseUid)
+	env.script_key = key
+	env.FROST_KEY = key
+	env.FROST_SESSION = _session
+	env.FROST_LICENSE_UID = _licenseUid
+	env.SWG_LicenseUID = _licenseUid
+	env.FROST_AUTH = {
+		session = _session,
+		key = key,
+		licenseUid = _licenseUid,
+	}
+end
+
+local function getExecutorName()
+	local executor = "Unknown"
+	pcall(function()
+		if identifyexecutor then
+			executor = identifyexecutor()
+		elseif getexecutorname then
+			executor = getexecutorname()
+		elseif syn then
+			executor = "Synapse X"
+		elseif KRNL_LOADED then
+			executor = "Krnl"
+		elseif is_sirhurt_closure then
+			executor = "SirHurt"
+		elseif pebc_execute then
+			executor = "ProtoSmasher"
+		elseif getgenv and getgenv().WRD_LOADED then
+			executor = "WeAreDevs"
+		elseif getgenv and getgenv().IS_VFLUX then
+			executor = "VFlux"
+		elseif getgenv and getgenv().IS_SOLARA then
+			executor = "Solara"
+		elseif getgenv and getgenv().IS_WAVE then
+			executor = "Wave"
+		end
+	end)
+	return executor
+end
+
+local function getRobloxUserId()
+	local uid = ""
+	pcall(function()
+		uid = tostring(lp.UserId)
+	end)
+	return uid
+end
+
+local function doCheck(key)
+	local hwid = getHWID()
+	local timestamp = tostring(os.time())
+	local placeId = tostring(game.PlaceId)
+	local jobId = tostring(game.JobId or "")
+	local executor = getExecutorName()
+	local robloxUser = getRobloxUserId()
+
+	local discordId = ""
+	pcall(function()
+		if isfile and isfile("frost_discord.txt") then
+			local ok, data = pcall(readfile, "frost_discord.txt")
+			if ok and data then discordId = trim(data) end
+		end
+	end)
+
+	local url = SERVER_URL
+		.. "/check"
+		.. "?key=" .. urlEncode(key)
+		.. "&hwid=" .. urlEncode(hwid)
+		.. "&place_id=" .. urlEncode(placeId)
+		.. "&job_id=" .. urlEncode(jobId)
+		.. "&timestamp=" .. urlEncode(timestamp)
+		.. "&executor=" .. urlEncode(executor)
+		.. "&roblox_user=" .. urlEncode(robloxUser)
+		.. "&guild=" .. urlEncode(GUILD_ID)
+		.. (discordId ~= "" and "&discord_id=" .. urlEncode(discordId) or "")
+
+	local ok, response = pcall(function()
+		return game:HttpGet(url, true)
+	end)
+	if not ok then return false, "Connection failed" end
+
+	local ok2, data = pcall(function()
+		return HttpService:JSONDecode(response)
+	end)
+	if not ok2 or type(data) ~= "table" then return false, "Invalid server response" end
+
+	applyAuthData(key, data)
+	return data.status == "ok" or data.status == "activated", data.message or data.status, data
+end
+
+local function fetchPayload()
+	if not _session then return nil end
+	local hwid = getHWID()
+	local url = SERVER_URL
+		.. "/payload"
+		.. "?session=" .. urlEncode(_session)
+		.. "&hwid=" .. urlEncode(hwid)
+		.. "&guild=" .. urlEncode(GUILD_ID)
+	local ok, response = pcall(function()
+		return game:HttpGet(url, true)
+	end)
+	if not ok then return nil end
+	return response
+end
+
+-- ========================================================================
+--  LOADING SCREEN
+-- ========================================================================
+
+local Folder = "frostvip"
+local ImagesFolder = Folder .. "/Images/"
+local FontsFolder = Folder .. "/Fonts/"
+
+if makefolder then
+	pcall(makefolder, Folder)
+	pcall(makefolder, ImagesFolder)
+	pcall(makefolder, FontsFolder)
+end
+
+local startTime = tick()
+local C_BG     = Color3.fromRGB(13, 13, 13)
+local C_BORDER = Color3.fromRGB(176, 176, 209)
+local C_ACCENT = Color3.fromRGB(176, 176, 209)
+local C_TEXT   = Color3.fromRGB(220, 220, 230)
+local C_MUTED  = Color3.fromRGB(130, 130, 140)
+local C_ERR    = Color3.fromRGB(210, 70, 70)
+local C_OK     = Color3.fromRGB(220, 220, 230)
+local readyOk  = true
+local readyMsg = ""
+
+if not (isfile and writefile and makefolder and readfile and delfile) then readyOk = false; readyMsg = "missing executor api" end
+if readyOk and not Players.LocalPlayer then readyOk = false; readyMsg = "no localplayer" end
+
+local function downloadFile(url, path)
+	if isfile(path) then return true end
+	local ok, data = pcall(game.HttpGet, game, url)
+	if ok and data and #data > 100 then
+		writefile(path, data)
+		return true
+	end
+	return false
+end
+
+local iconPath = Folder .. "/icon.png"
+downloadFile("https://raw.githubusercontent.com/sh1shochek/frostvip/main/assets/icon.png", iconPath)
+local iconAsset = ""
+if isfile(iconPath) then
+	local ok, a = pcall(getcustomasset, iconPath)
+	if ok then iconAsset = a end
+end
+
+local TTF  = FontsFolder .. "TahomaXP.ttf"
+local JSON = FontsFolder .. "TahomaXP.json"
+downloadFile("https://raw.githubusercontent.com/sh1shochek/frostvip/main/assets/windows-xp-tahoma.ttf", TTF)
+local loaderFont = nil
+if isfile(TTF) then
+	if not isfile(JSON) then
+		local fd = {
+			name = "TahomaXP",
+			faces = {{ name = "Regular", weight = 400, style = "normal", assetId = getcustomasset(TTF) }}
+		}
+		writefile(JSON, HttpService:JSONEncode(fd))
+	end
+	local ok, f = pcall(Font.new, getcustomasset(JSON))
+	if ok and f then loaderFont = f end
+end
+
+local sg = Instance.new("ScreenGui")
+sg.Name = "FrostLoaderGui"
+sg.ResetOnSpawn = false
+sg.DisplayOrder = 9999
+sg.IgnoreGuiInset = true
+pcall(function() sg.Parent = CoreGui end)
+if not sg.Parent then sg.Parent = lp:WaitForChild("PlayerGui") end
+
+local W, H   = 220, 50
+local ICON_S = 36
+local PAD    = 10
+local TEXT_X = PAD + ICON_S + 8
+
+local card = Instance.new("Frame", sg)
+card.Size = UDim2.fromOffset(W, H)
+card.AnchorPoint = Vector2.new(0.5, 0.5)
+card.Position = UDim2.new(0.5, 0, 0.5, 0)
+card.BackgroundColor3 = C_BG
+card.BorderSizePixel = 0
+card.BackgroundTransparency = 1
+card.ZIndex = 2
+
+local stroke = Instance.new("UIStroke", card)
+stroke.Color = C_BORDER
+stroke.Thickness = 2
+stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+stroke.Transparency = 1
+
+local imgLabel = Instance.new("ImageLabel", card)
+imgLabel.Size = UDim2.fromOffset(ICON_S, ICON_S)
+imgLabel.ImageTransparency = 1
+imgLabel.Position = UDim2.fromOffset(PAD, math.floor((H - ICON_S) / 2))
+imgLabel.BackgroundTransparency = 1
+imgLabel.Image = iconAsset
+imgLabel.ScaleType = Enum.ScaleType.Fit
+imgLabel.ZIndex = 3
+
+local lblTitle = Instance.new("TextLabel", card)
+lblTitle.Size = UDim2.fromOffset(W - TEXT_X - 8, 22)
+lblTitle.Position = UDim2.fromOffset(TEXT_X, 9)
+lblTitle.BackgroundTransparency = 1
+lblTitle.Text = "loading..."
+lblTitle.TextSize = 11
+lblTitle.TextTransparency = 1
+lblTitle.TextColor3 = C_TEXT
+lblTitle.TextXAlignment = Enum.TextXAlignment.Left
+lblTitle.ZIndex = 3
+if loaderFont then lblTitle.FontFace = loaderFont else lblTitle.Font = Enum.Font.Code end
+
+local lblStage = Instance.new("TextLabel", card)
+lblStage.Size = UDim2.fromOffset(W - TEXT_X - 8, 16)
+lblStage.Position = UDim2.fromOffset(TEXT_X, 22)
+lblStage.BackgroundTransparency = 1
+lblStage.Text = "Initializing"
+lblStage.TextSize = 10
+lblStage.TextTransparency = 1
+lblStage.TextColor3 = C_MUTED
+lblStage.TextXAlignment = Enum.TextXAlignment.Left
+lblStage.ZIndex = 3
+if loaderFont then lblStage.FontFace = loaderFont else lblStage.Font = Enum.Font.Code end
+
+local BAR_W = W - TEXT_X - 8
+local barBg = Instance.new("Frame", card)
+barBg.Size = UDim2.fromOffset(BAR_W, 3)
+barBg.Position = UDim2.fromOffset(TEXT_X, H - 8)
+barBg.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
+barBg.BorderSizePixel = 0
+barBg.BackgroundTransparency = 1
+barBg.ZIndex = 3
+
+local barFill = Instance.new("Frame", barBg)
+barFill.Size = UDim2.fromOffset(0, 3)
+barFill.BackgroundColor3 = C_ACCENT
+barFill.BorderSizePixel = 0
+barFill.ZIndex = 4
+barFill.BackgroundTransparency = 1
+
+local eIn = TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+
+local function animIn()
+	TweenService:Create(card, eIn, {BackgroundTransparency = 0, Size = UDim2.fromOffset(W, H)}):Play()
+	TweenService:Create(stroke, eIn, {Transparency = 0}):Play()
+	task.wait(0.15)
+	TweenService:Create(barBg, eIn, {BackgroundTransparency = 0}):Play()
+	task.wait(0.08)
+	TweenService:Create(imgLabel, eIn, {ImageTransparency = 0}):Play()
+	TweenService:Create(lblTitle, eIn, {TextTransparency = 0}):Play()
+	task.wait(0.12)
+	TweenService:Create(lblStage, eIn, {TextTransparency = 0}):Play()
+	task.wait(0.1)
+	TweenService:Create(barFill, eIn, {BackgroundTransparency = 0, Size = UDim2.fromOffset(3, 3)}):Play()
+end
+
+local function setProgress(pct, name)
+	lblStage.Text = name
+	TweenService:Create(barFill, TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+		{Size = UDim2.fromOffset(math.floor(BAR_W * pct), 3)}):Play()
+end
+
+local function setError(msg)
+	lblTitle.Text = "error"
+	lblTitle.TextColor3 = C_ERR
+	lblStage.Text = msg
+	lblStage.TextColor3 = C_ERR
+	barFill.BackgroundColor3 = C_ERR
+end
+
+local function setSuccess(msg)
+	lblTitle.Text = msg
+	lblTitle.TextColor3 = C_OK
+	lblStage.TextColor3 = C_OK
+	barFill.BackgroundColor3 = C_OK
+end
+
+local function fadeOutAndDestroy(callback)
+	local eOut = TweenInfo.new(0.5, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+	TweenService:Create(lblTitle, eOut, {TextTransparency = 1}):Play()
+	TweenService:Create(lblStage, eOut, {TextTransparency = 1}):Play()
+	TweenService:Create(imgLabel, eOut, {ImageTransparency = 1}):Play()
+	TweenService:Create(barBg, eOut, {BackgroundTransparency = 1}):Play()
+	TweenService:Create(barFill, eOut, {BackgroundTransparency = 1}):Play()
+	TweenService:Create(card, eOut, {BackgroundTransparency = 1}):Play()
+	TweenService:Create(stroke, eOut, {Transparency = 1}):Play()
+	task.delay(0.6, function()
+		if sg then sg:Destroy() end
+		if callback then callback() end
+	end)
+end
+
+-- ========================================================================
+--  KEY INPUT
+-- ========================================================================
+
+local function showKeyInput(onSubmit)
+	local inputSg = Instance.new("ScreenGui")
+	inputSg.Name = "FrostKeyInput"
+	inputSg.ResetOnSpawn = false
+	inputSg.DisplayOrder = 10000
+	inputSg.IgnoreGuiInset = true
+	pcall(function() inputSg.Parent = CoreGui end)
+	if not inputSg.Parent then inputSg.Parent = lp:WaitForChild("PlayerGui") end
+
+	local overlay = Instance.new("Frame", inputSg)
+	overlay.Size = UDim2.fromScale(1, 1)
+	overlay.BackgroundColor3 = Color3.new(0, 0, 0)
+	overlay.BackgroundTransparency = 0.45
+	overlay.BorderSizePixel = 0
+
+	local iCard = Instance.new("Frame", inputSg)
+	iCard.Size = UDim2.fromOffset(300, 110)
+	iCard.AnchorPoint = Vector2.new(0.5, 0.5)
+	iCard.Position = UDim2.new(0.5, 0, 0.5, 0)
+	iCard.BackgroundColor3 = C_BG
+	iCard.BorderSizePixel = 0
+	iCard.BackgroundTransparency = 1
+
+	local iStroke = Instance.new("UIStroke", iCard)
+	iStroke.Color = C_BORDER
+	iStroke.Thickness = 2
+	iStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	iStroke.Transparency = 1
+
+	local iAccent = Instance.new("Frame", iCard)
+	iAccent.Size = UDim2.new(1, 0, 0, 2)
+	iAccent.BackgroundColor3 = C_ACCENT
+	iAccent.BorderSizePixel = 0
+
+	local iTitle = Instance.new("TextLabel", iCard)
+	iTitle.Size = UDim2.fromOffset(280, 18)
+	iTitle.Position = UDim2.fromOffset(10, 8)
+	iTitle.BackgroundTransparency = 1
+	iTitle.Text = "frost.vip"
+	iTitle.TextSize = 13
+	iTitle.TextColor3 = C_ACCENT
+	iTitle.TextXAlignment = Enum.TextXAlignment.Left
+	if loaderFont then iTitle.FontFace = loaderFont else iTitle.Font = Enum.Font.Code end
+
+	local iSub = Instance.new("TextLabel", iCard)
+	iSub.Size = UDim2.fromOffset(280, 14)
+	iSub.Position = UDim2.fromOffset(10, 26)
+	iSub.BackgroundTransparency = 1
+	iSub.Text = "Enter license key"
+	iSub.TextSize = 11
+	iSub.TextColor3 = C_MUTED
+	iSub.TextXAlignment = Enum.TextXAlignment.Left
+	if loaderFont then iSub.FontFace = loaderFont else iSub.Font = Enum.Font.Code end
+
+	local iBg = Instance.new("Frame", iCard)
+	iBg.Size = UDim2.fromOffset(280, 28)
+	iBg.Position = UDim2.fromOffset(10, 44)
+	iBg.BackgroundColor3 = Color3.fromRGB(19, 19, 19)
+	iBg.BorderSizePixel = 0
+	Instance.new("UICorner", iBg).CornerRadius = UDim.new(0, 4)
+
+	local iBgStroke = Instance.new("UIStroke", iBg)
+	iBgStroke.Color = Color3.fromRGB(51, 51, 51)
+	iBgStroke.Thickness = 1
+	iBgStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+	local iBox = Instance.new("TextBox", iBg)
+	iBox.Size = UDim2.new(1, -10, 1, 0)
+	iBox.Position = UDim2.fromOffset(5, 0)
+	iBox.BackgroundTransparency = 1
+	iBox.PlaceholderText = "frost-XXXXXXXX-XXXXXXXX-XXXX"
+	iBox.Text = getInjectedKey() or ""
+	iBox.TextSize = 12
+	iBox.TextColor3 = C_TEXT
+	iBox.PlaceholderColor3 = C_MUTED
+	iBox.TextXAlignment = Enum.TextXAlignment.Left
+	iBox.ClearTextOnFocus = false
+	if loaderFont then iBox.FontFace = loaderFont else iBox.Font = Enum.Font.Code end
+
+	local iBtn = Instance.new("TextButton", iCard)
+	iBtn.Size = UDim2.fromOffset(280, 26)
+	iBtn.Position = UDim2.fromOffset(10, 78)
+	iBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+	iBtn.BorderSizePixel = 0
+	iBtn.Text = "Authenticate"
+	iBtn.TextSize = 11
+	iBtn.TextColor3 = C_ACCENT
+	iBtn.AutoButtonColor = false
+	if loaderFont then iBtn.FontFace = loaderFont else iBtn.Font = Enum.Font.Code end
+	Instance.new("UICorner", iBtn).CornerRadius = UDim.new(0, 4)
+
+	local iBtnStroke = Instance.new("UIStroke", iBtn)
+	iBtnStroke.Color = C_ACCENT
+	iBtnStroke.Thickness = 1
+	iBtnStroke.Transparency = 0.5
+	iBtnStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+	local eIn2 = TweenInfo.new(0.4, Enum.EasingStyle.Quint)
+	TweenService:Create(iCard, eIn2, {BackgroundTransparency = 0}):Play()
+	TweenService:Create(iStroke, eIn2, {Transparency = 0}):Play()
+
+	local function submit()
+		local key = trim(iBox.Text)
+		if #key < 5 then
+			iSub.Text = "! Enter your license key"
+			iSub.TextColor3 = C_ERR
+			return
+		end
+		iSub.Text = "Checking..."
+		iSub.TextColor3 = C_MUTED
+		iBtn.Text = "Checking..."
+		iBtn.TextColor3 = C_MUTED
+		local ok, msg = doCheck(key)
+		if ok then
+			saveKey(key)
+			TweenService:Create(iCard, eIn2, {BackgroundTransparency = 1}):Play()
+			TweenService:Create(iStroke, eIn2, {Transparency = 1}):Play()
+			TweenService:Create(overlay, eIn2, {BackgroundTransparency = 1}):Play()
+			task.delay(0.5, function()
+				inputSg:Destroy()
+				onSubmit(key)
+			end)
+		else
+			iSub.Text = msg or "Failed"
+			iSub.TextColor3 = C_ERR
+			iBtn.Text = "Authenticate"
+			iBtn.TextColor3 = C_ACCENT
+		end
+	end
+
+	iBtn.MouseButton1Click:Connect(submit)
+	iBox.FocusLost:Connect(function(enterPressed) if enterPressed then submit() end end)
+end
+
+-- ========================================================================
+--  MAIN FLOW
+-- ========================================================================
+
+local saved = getInjectedKey() or loadSavedKey()
+
+local function runAuthAndLoad(key)
+	animIn()
+	local stages = {
+		{0.10, "Initializing",        0.20},
+		{0.25, "Connecting to server", 0.30},
+		{0.50, "Authenticating",       0.40},
+		{0.75, "Verifying HWID",       0.25},
+		{0.90, "Loading script",       0.30},
+		{1.00, "Complete!",            0.20},
+	}
+	task.spawn(function()
+		if not readyOk then
+			setError(readyMsg)
+			task.wait(3.5)
+			fadeOutAndDestroy()
+			return
+		end
+		for _, s in ipairs(stages) do
+			setProgress(s[1], s[2])
+			task.wait(s[3])
+		end
+		local ok, msg, data = doCheck(key)
+		if not ok then
+			setError(msg or "Auth failed")
+			clearKey()
+			task.wait(3.5)
+			fadeOutAndDestroy(function()
+				showKeyInput(runAuthAndLoad)
+			end)
+			return
+		end
+		applyAuthData(key, data)
+		setSuccess("loaded in " .. string.format("%.2f", tick() - startTime) .. "s")
+		task.wait(0.4)
+		fadeOutAndDestroy(function()
+			local payload = fetchPayload()
+			if payload and #payload > 10 and not payload:find("Error:") then
+				local fn, err = loadstring(payload)
+				if fn then
+					task.spawn(fn)
+				else
+					warn("[frost.vip] Failed to load payload:", err)
+				end
+			else
+				warn("[frost.vip] Payload error or empty")
+			end
+		end)
+	end)
+end
+
+if saved and #saved > 5 then
+	runAuthAndLoad(saved)
+else
+	showKeyInput(runAuthAndLoad)
+end
