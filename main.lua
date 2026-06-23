@@ -496,8 +496,8 @@ local Library = {
     },
 
     TabAnimation = {
-        Time = 1,
-        Style = "Exponential",
+        Time = 0.55,
+        Style = "Quart",
         Direction = "Out"
     },
 
@@ -3199,7 +3199,7 @@ local Library = {
                     Parent = Library.Holder.Instance,
                     AnchorPoint = Vector2.new(0.5, 0.5),
                     Position = UDim2.new(0.5, 0, 0.5, 0),
-                    Size = UDim2.new(0, 613, 0, 453),
+                    Size = UDim2.new(0, 500, 0, 580),
                     BorderSizePixel = 0,
                     BackgroundColor3 = Library.Theme["Border"]
                 }):AddToTheme({BackgroundColor3 = 'Border'})
@@ -3364,6 +3364,135 @@ local Library = {
                 AutomaticSize = Enum.AutomaticSize.XY
             }):AddToTheme({TextColor3 = 'Accent'})
 
+            -- ===== Shimmer: бегущая белая волна по Liner / Glow / активной вкладке =====
+            do
+                local RunService = game:GetService("RunService")
+                local startT     = tick()
+                local linerInst  = Items["Liner"]  and Items["Liner"].Instance
+                local glowInst   = Items["Glow"]   and Items["Glow"].Instance
+
+                -- Скорость бегущей волны (циклов в секунду). Больше = быстрее.
+                local WAVE_SPEED        = 0.18
+                -- Ширина белого пика (доля от длины элемента, 0..1).
+                local WAVE_WIDTH        = 0.85
+                -- Насколько ярко переливать (1 = до чистого белого, 0 = без эффекта)
+                local WAVE_INTENSITY    = 0.65
+
+                local function makeGradient(parent, isImage)
+                    local g = parent:FindFirstChild("ShimmerGradient")
+                    if g then return g end
+                    g = Instance.new("UIGradient")
+                    g.Name   = "ShimmerGradient"
+                    g.Parent = parent
+                    g.Rotation = 0 -- горизонтально (слева направо)
+                    return g
+                end
+
+                local linerGrad, glowGrad, tabGrad
+                if linerInst then linerGrad = makeGradient(linerInst) end
+                if glowInst  then glowGrad  = makeGradient(glowInst)  end
+
+                local accent = Library.Theme and Library.Theme["Accent"] or Color3.fromRGB(0, 102, 255)
+                local white  = Color3.fromRGB(255, 255, 255)
+
+                -- ColorSequence с белым пиком на позиции p (0..1) и шириной w.
+                -- highlightI: насколько ярко проявляется белая дымка (0..1).
+                local function buildSeq(p, w, baseColor, highlightI)
+                    if highlightI == nil then highlightI = WAVE_INTENSITY end
+                    highlightI = math.clamp(highlightI, 0, 1)
+                    local half = math.max(w * 0.5, 0.02)
+                    -- Точки пика, ограничиваем 0..1
+                    local left  = math.clamp(p - half, 0, 1)
+                    local right = math.clamp(p + half, 0, 1)
+                    local mixColor = baseColor:Lerp(white, highlightI)
+
+                    local kp = { ColorSequenceKeypoint.new(0, baseColor) }
+                    if left > 0.001 then
+                        table.insert(kp, ColorSequenceKeypoint.new(left, baseColor))
+                    end
+                    if p > 0.001 and p < 0.999 then
+                        table.insert(kp, ColorSequenceKeypoint.new(math.clamp(p, 0.0011, 0.9989), mixColor))
+                    end
+                    if right < 0.999 then
+                        table.insert(kp, ColorSequenceKeypoint.new(right, baseColor))
+                    end
+                    table.insert(kp, ColorSequenceKeypoint.new(1, baseColor))
+
+                    -- UIGradient требует уникальных time’ов и хотя бы 2 точек
+                    -- Сортируем и дедуплицируем
+                    table.sort(kp, function(a, b) return a.Time < b.Time end)
+                    local cleaned = { kp[1] }
+                    for i = 2, #kp do
+                        if kp[i].Time - cleaned[#cleaned].Time > 0.0005 then
+                            table.insert(cleaned, kp[i])
+                        end
+                    end
+                    if #cleaned < 2 then
+                        cleaned = { ColorSequenceKeypoint.new(0, baseColor), ColorSequenceKeypoint.new(1, baseColor) }
+                    end
+                    return ColorSequence.new(cleaned)
+                end
+
+                -- Скорость кросс-фейда между активной/неактивной вкладкой
+                -- (единиц в секунду; 4.0 ≈ 0.25с на полный переход).
+                local TAB_FADE_SPEED = 4.0
+
+                Library:Connect(RunService.RenderStepped, function(dt)
+                    dt = math.min(dt or 1/60, 0.1)
+
+                    -- pos идёт 0 -> 1 -> 0 -> 1 ... (треугольная волна — туда и обратно)
+                    local t   = (tick() - startT) * WAVE_SPEED
+                    local f   = t - math.floor(t)              -- 0..1
+                    local pos = (f < 0.5) and (f * 2) or (2 - f * 2) -- 0..1..0
+
+                    local curAccent = Library.Theme and Library.Theme["Accent"] or accent
+                    local idleColor = (Library.Theme and Library.Theme["Inactive Text"]) or Color3.fromRGB(150, 150, 150)
+
+                    -- ВАЖНО: UIGradient умножает базовый цвет элемента на цвет градиента.
+                    -- Поэтому базу держим белой (1,1,1), а оттенок задаёт только градиент.
+                    -- Так и акцент берётся ровно тот, что выбрал юзер,
+                    -- и чёрный акцент не «съедает» белый блик.
+                    if linerInst and linerInst.Parent then
+                        linerInst.BackgroundColor3 = white
+                    end
+                    if glowInst and glowInst.Parent then
+                        glowInst.ImageColor3 = white
+                    end
+
+                    if linerGrad and linerGrad.Parent then
+                        linerGrad.Color = buildSeq(pos, WAVE_WIDTH, curAccent, WAVE_INTENSITY)
+                    end
+                    if glowGrad and glowGrad.Parent then
+                        glowGrad.Color = buildSeq(pos, WAVE_WIDTH, curAccent, WAVE_INTENSITY)
+                    end
+
+                    -- Кросс-фейд для всех вкладок: цвет = lerp(idle, accent, intensity),
+                    -- белая дымка тоже модулируется этой же intensity.
+                    local current = Window.Current
+                    local lerpStep = math.min(dt * TAB_FADE_SPEED, 1)
+
+                    for _, page in pairs(Window.Pages) do
+                        local btn = page.Items and page.Items["Inactive"] and page.Items["Inactive"].Instance
+                        if btn and btn.Parent then
+                            local target = (page == current) and 1 or 0
+                            page._shimIntensity = page._shimIntensity or target
+                            -- плавная интерполяция к таргету
+                            page._shimIntensity = page._shimIntensity + (target - page._shimIntensity) * lerpStep
+
+                            local grad = btn:FindFirstChild("ShimmerGradient")
+                            if not grad then
+                                grad = makeGradient(btn)
+                            end
+
+                            btn.TextColor3 = white
+                            local baseColor = idleColor:Lerp(curAccent, page._shimIntensity)
+                            grad.Color = buildSeq(pos, WAVE_WIDTH, baseColor, WAVE_INTENSITY * page._shimIntensity)
+                        end
+                    end
+                end)
+            end
+            -- ===== /Shimmer =====
+
             Window:Center()
             return setmetatable(Window, Library)
         end
@@ -3508,33 +3637,105 @@ local Library = {
                 end
 
                 Page.Debounce = true 
-                
-                if Old then 
-                    Old.Items["Page"].Instance.Position = UDim2.new(0, 0, 0, 0)
+
+                -- Определяем направление: если новая вкладка правее старой — едем влево, иначе вправо.
+                local function indexOf(list, val)
+                    for i, v in ipairs(list) do if v == val then return i end end
+                    return 0
+                end
+                local newIdx = indexOf(Page.Window.Pages, Page)
+                local oldIdx = Old and indexOf(Page.Window.Pages, Old) or newIdx
+                local dir = (newIdx >= oldIdx) and 1 or -1   -- 1 = новая справа, -1 = новая слева
+
+                -- Оффсет старта новой страницы — поменьше, чтобы выезд был мягким
+                local startOff = 0.18 * dir
+
+                if Old then
                     Old.Items["Inactive"]:ChangeItemTheme({TextColor3 = "Inactive Text"})
                     Old.Items["Inactive"]:Tween({TextColor3 = Library.Theme["Inactive Text"]})
 
-                    Old.Items["Page"]:Tween({Position = UDim2.new(-1, 0, 0, 0)}, PageInfo)
+                    -- старая страница плавно уезжает в противоположную сторону
+                    Old.Items["Page"]:Tween({Position = UDim2.new(-startOff, 0, 0, 0)}, PageInfo)
 
                     Old.Items["Page"]:FadeDescendants(false, function()
-                        Old.Items["Page"].Instance.Parent = Library.UnusedHolder.Instance
+                        if Old.Items["Page"].Instance.Parent ~= Library.UnusedHolder.Instance then
+                            Old.Items["Page"].Instance.Parent = Library.UnusedHolder.Instance
+                        end
                     end)
 
                     Old.Active = false
                 end
 
-                Items["Page"].Instance.Position = UDim2.new(1, 0, 0, 0)
-                
-                Items["Page"].Instance.Parent = Page.Window.Items["Content"].Instance
-                Items["Page"].Instance.Visible = true
-                Items["Page"]:FadeDescendants(true, function()
-                    Page.Debounce = false
+                -- новая страница появляется со смещением и плавно въезжает в центр.
+                -- ВАЖНО: чтобы не было кадра-вспышки, делаем кастомный фейд:
+                --   1) запоминаем целевые прозрачности всех потомков
+                --   2) гасим их в 1
+                --   3) добавляем страницу в иерархию и ставим Visible (теперь она невидима)
+                --   4) ждём кадр (RenderStepped), чтобы Layout посчитал размеры
+                --   5) твиним обратно к сохранённым значениям
+                local pageInst = Items["Page"].Instance
+                pageInst.Position = UDim2.new(startOff, 0, 0, 0)
+
+                local RunService = game:GetService("RunService")
+                local TweenService = game:GetService("TweenService")
+                local fadeInfo = TweenInfo.new(Library.Animation.Time,
+                    Enum.EasingStyle[Library.Animation.Style],
+                    Enum.EasingDirection[Library.Animation.Direction])
+
+                local targets = {}  -- { {obj, prop, value}, ... }
+                local function collect(inst)
+                    local props = Library:GetTweenProperty(inst)
+                    if props then
+                        if type(props) ~= "table" then props = { props } end
+                        for _, p in ipairs(props) do
+                            local ok, cur = pcall(function() return inst[p] end)
+                            if ok then
+                                table.insert(targets, { obj = inst, prop = p, value = cur })
+                            end
+                        end
+                    end
+                end
+                collect(pageInst)
+                for _, d in ipairs(pageInst:GetDescendants()) do
+                    collect(d)
+                end
+
+                -- гасим в 1
+                for _, t in ipairs(targets) do
+                    pcall(function() t.obj[t.prop] = 1 end)
+                end
+
+                pageInst.Visible = true
+                pageInst.Parent = Page.Window.Items["Content"].Instance
+
+                -- ждём один кадр, чтобы AutomaticSize/UIListLayout посчитали раскладку,
+                -- и только после этого запускаем фейд + сдвиг.
+                task.spawn(function()
+                    RunService.RenderStepped:Wait()
+                    if not pageInst or not pageInst.Parent then return end
+
+                    -- фейд каждого свойства обратно к запомненному значению
+                    local lastTween
+                    for _, t in ipairs(targets) do
+                        if t.obj and t.obj.Parent then
+                            local tw = TweenService:Create(t.obj, fadeInfo, { [t.prop] = t.value })
+                            tw:Play()
+                            lastTween = tw
+                        end
+                    end
+                    if lastTween then
+                        lastTween.Completed:Connect(function()
+                            Page.Debounce = false
+                        end)
+                    else
+                        Page.Debounce = false
+                    end
+
+                    Items["Page"]:Tween({Position = UDim2.new(0, 0, 0, 0)}, PageInfo)
                 end)
 
                 Items["Inactive"]:ChangeItemTheme({TextColor3 = "Accent"})
                 Items["Inactive"]:Tween({TextColor3 = Library.Theme["Accent"]})
-
-                Items["Page"]:Tween({Position = UDim2.new(0, 0, 0, 0)}, PageInfo)
 
                 Page.Window.Current = Page
                 Page.Active = true
@@ -3626,7 +3827,7 @@ local Library = {
                 Library:Create("UIListLayout", {
                     Name = "\0",
                     Parent = Items["Content"].Instance,
-                    Padding = UDim.new(0, 8),
+                    Padding = UDim.new(0, 4),
                     SortOrder = Enum.SortOrder.LayoutOrder
                 })
 
@@ -4018,7 +4219,7 @@ local Library = {
                     Name = "\0",
                     Parent = Parent.Instance,
                     BackgroundTransparency = 1,
-                    Size = UDim2.new(1, 0, 0, 30),
+                    Size = UDim2.new(1, 0, 0, 23),
                     BorderSizePixel = 0
                 })
                 
