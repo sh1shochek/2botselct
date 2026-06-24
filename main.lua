@@ -41,26 +41,46 @@ if not LPH_OBFUSCATED then
 	SWG_IsLifetime = true
 end;
 
--- ---- adonis ----
--- ---- adonis ----
+-- ---- adonis / anti-kick ----
 do
-    for _, v in getgc(true) do
-        if type(v) ~= "table" then continue end
+	local Players = game:GetService("Players")
+	local LocalPlayer = Players.LocalPlayer
 
-        local namecallInstance = rawget(v, "namecallInstance")
-        if not (
-            namecallInstance
-            and type(namecallInstance) == "table"
-            and type(namecallInstance[1]) == "string"
-            and type(namecallInstance[2]) == "function"
-        ) then continue end
+	local hook = LocalPlayer.Kick
+	local mt = getrawmetatable(LocalPlayer)
 
-        setreadonly(v, false)
-        v["namecallInstance"] = {"kick", function(...)
-            return coroutine.yield()
-        end}
-        
-    end
+	local psuedoEnv = {
+		["__index"] = mt.__index,
+		["__namecall"] = mt.__namecall
+	}
+
+	local ReturnFunc = function() end
+
+	warn("Made By MHD444#0001")
+	setreadonly(mt, false)
+
+	mt.__namecall = newcclosure(function(self, Index, ...)
+		local NameCallMethod = getnamecallmethod()
+		if type(NameCallMethod) == "string" then
+			if NameCallMethod == "Kick" or NameCallMethod == "kick" then
+				print("Prevented Kick At " .. tostring(os.time()))
+				return ReturnFunc
+			end
+		end
+		return psuedoEnv.__namecall(self, Index, ...)
+	end)
+
+	mt.__index = newcclosure(function(self, Index, ...)
+		if type(Index) == "string" then
+			if Index == "Kick" or Index == "kick" then
+				print("Prevented Kick At " .. tostring(os.time()))
+				return ReturnFunc
+			end
+		end
+		return psuedoEnv.__index(self, Index, ...)
+	end)
+
+	setreadonly(mt, true)
 end
 
 -- ---- folders ----
@@ -7041,17 +7061,17 @@ LPH_NO_VIRTUALIZE(function()
 				zindex = 5
 				sizeMul = 1.02
 		elseif style == "Pulse" then
-			material = Enum.Material.Neon
-			local wave = (math.sin(now * 1.0) + 1) * 0.5
-			local pulse = 1.0 + (1 - wave) * 0.35
-			color = Color3.new(
-				math.clamp(base_color.R * pulse, 0, 1),
-				math.clamp(base_color.G * pulse, 0, 1),
-				math.clamp(base_color.B * pulse, 0, 1)
-			)
-			target_transparency = 0.08 + wave * 0.82
-			texture_id = ""
-elseif style == "Rainbow" then
+					-- Fixed: use the local 'base' color used by this function.
+					-- The old code referenced undefined base_color/target_transparency
+					-- and broke animated chams/renderstepped.
+					local wave = (math.sin(now * 1.0) + 1) * 0.5
+					local pulse = 1.0 + (1 - wave) * 0.35
+					color = scaledColor(base, pulse)
+					transparency = 0.08 + wave * 0.62
+					alwaysOnTop = true
+					zindex = 5
+					sizeMul = 1 + (1 - wave) * 0.035
+				elseif style == "Rainbow" then
 				color = Color3.fromHSV((now * 0.12) % 1, 0.75, 1)
 				transparency = 0.28
 				alwaysOnTop = true
@@ -8060,6 +8080,1426 @@ do -- grr
 	ui.subtabs.misc_main.Set(true)
 	ui.subtabs.settings_main.Set(true)
 end
+
+
+-- ---- floating ESP preview (Visuals tab only, no extra toggles) ----
+do
+	local Players = game:GetService("Players")
+	local RunService = game:GetService("RunService")
+	local UserInputService = game:GetService("UserInputService")
+	local LocalPlayer = Players.LocalPlayer
+
+	local newWindow = ui.window and ui.window.__new
+	local outlineInst = newWindow and newWindow.Items and newWindow.Items["Outline"] and newWindow.Items["Outline"].Instance
+	local holder = outlineInst and outlineInst.Parent
+
+	local previewConnections = {}
+	local function connect(signal, callback)
+		local ok, connection = pcall(function()
+			return signal:Connect(callback)
+		end)
+		if ok and connection then
+			table.insert(previewConnections, connection)
+		end
+		return connection
+	end
+
+	if newWindow and holder then
+		local PREVIEW_W, PREVIEW_H = 225, 350
+		local PAD = 8
+		local HEADER_H = 24
+		local LINE_H = 2
+
+		local menuLib = (getgenv and getgenv().Library) or nil
+		local menuFont = menuLib and menuLib.Font
+
+		local function applyMenuFont(label)
+			local ok = false
+			if menuFont then
+				ok = pcall(function()
+					label.FontFace = menuFont
+				end)
+			end
+			if not ok then
+				label.Font = Enum.Font.Code
+			end
+		end
+
+		local function getAccent()
+			return (menuLib and menuLib.Theme and (menuLib.Theme["Accent"] or menuLib.Theme.accent))
+				or (Library.Theme and (Library.Theme["Accent"] or Library.Theme.accent))
+				or Color3.fromRGB(176, 176, 209)
+		end
+
+		local function getTheme(name, fallback)
+			return (menuLib and menuLib.Theme and menuLib.Theme[name])
+				or (Library.Theme and Library.Theme[name])
+				or fallback
+		end
+
+		local preview = Instance.new("Frame")
+		preview.Name = "Frost_ESP_Preview"
+		preview.Parent = holder
+		preview.Size = UDim2.fromOffset(PREVIEW_W, PREVIEW_H)
+		preview.BackgroundColor3 = getTheme("Background", Color3.fromRGB(12, 12, 12))
+		preview.BorderSizePixel = 0
+		preview.Visible = false
+		preview.ZIndex = 50
+
+		-- Section-like white/outline border around the preview.
+		local previewOutlineStroke = Instance.new("UIStroke")
+		previewOutlineStroke.Parent = preview
+		previewOutlineStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		previewOutlineStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		previewOutlineStroke.Thickness = 1
+		previewOutlineStroke.Color = Color3.fromRGB(255, 255, 255)
+		previewOutlineStroke.Transparency = 1
+
+		local previewBorderStroke = Instance.new("UIStroke")
+		previewBorderStroke.Parent = preview
+		previewBorderStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		previewBorderStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		previewBorderStroke.Thickness = 1
+		previewBorderStroke.Color = getTheme("Border", Color3.fromRGB(3, 3, 3))
+		previewBorderStroke.Transparency = 1
+		pcall(function() previewBorderStroke.BorderOffset = UDim.new(0, 1) end)
+
+		local title = Instance.new("TextLabel")
+		title.Parent = preview
+		title.BackgroundTransparency = 1
+		title.Position = UDim2.fromOffset(8, 5)
+		title.Size = UDim2.new(1, -16, 0, 14)
+		title.Text = "ESP Preview"
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.TextYAlignment = Enum.TextYAlignment.Center
+		title.TextSize = menuLib and menuLib.FontSize or Library.FontSize or 12
+		title.TextColor3 = getTheme("Text", Color3.fromRGB(208, 207, 227))
+		title.ZIndex = 52
+		applyMenuFont(title)
+
+		-- Только верхняя accent-линия как у меню, без полной обводки окна.
+		local topLine = Instance.new("Frame")
+		topLine.Parent = preview
+		topLine.Position = UDim2.fromOffset(0, HEADER_H)
+		topLine.Size = UDim2.new(1, 0, 0, LINE_H)
+		topLine.BackgroundColor3 = Color3.new(1, 1, 1)
+		topLine.BorderSizePixel = 0
+		topLine.ZIndex = 53
+		local topLineGradient = Instance.new("UIGradient")
+		topLineGradient.Parent = topLine
+		topLineGradient.Rotation = 0
+
+		local viewport = Instance.new("ViewportFrame")
+		viewport.Parent = preview
+		viewport.Position = UDim2.fromOffset(PAD, HEADER_H + LINE_H + PAD)
+		viewport.Size = UDim2.new(1, -PAD * 2, 1, -(HEADER_H + LINE_H + PAD * 2))
+		viewport.BackgroundColor3 = getTheme("Inline", Color3.fromRGB(19, 19, 19))
+		viewport.BorderSizePixel = 0
+		viewport.Ambient = Color3.fromRGB(130, 130, 135)
+		viewport.LightColor = Color3.fromRGB(255, 255, 255)
+		viewport.LightDirection = Vector3.new(-0.35, -0.65, -0.45)
+		viewport.ZIndex = 51
+
+		local viewportOutlineStroke = Instance.new("UIStroke")
+		viewportOutlineStroke.Parent = viewport
+		viewportOutlineStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		viewportOutlineStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		viewportOutlineStroke.Thickness = 1
+		viewportOutlineStroke.Color = getTheme("Outline", Color3.fromRGB(51, 51, 51))
+
+		local viewportBorderStroke = Instance.new("UIStroke")
+		viewportBorderStroke.Parent = viewport
+		viewportBorderStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		viewportBorderStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		viewportBorderStroke.Thickness = 1
+		viewportBorderStroke.Color = getTheme("Border", Color3.fromRGB(3, 3, 3))
+		pcall(function() viewportBorderStroke.BorderOffset = UDim.new(0, 1) end)
+
+		-- Visible section-style border drawn above the ViewportFrame (UIStroke on
+		-- ViewportFrame can be swallowed by some executors).
+		local viewportBorderFrame = Instance.new("Frame")
+		viewportBorderFrame.Parent = preview
+		viewportBorderFrame.Position = viewport.Position
+		viewportBorderFrame.Size = viewport.Size
+		viewportBorderFrame.BackgroundTransparency = 1
+		viewportBorderFrame.BorderSizePixel = 0
+		viewportBorderFrame.ZIndex = 72
+		local viewportBorderFrameOutline = Instance.new("UIStroke")
+		viewportBorderFrameOutline.Parent = viewportBorderFrame
+		viewportBorderFrameOutline.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		viewportBorderFrameOutline.LineJoinMode = Enum.LineJoinMode.Miter
+		viewportBorderFrameOutline.Thickness = 1
+		viewportBorderFrameOutline.Color = getTheme("Outline", Color3.fromRGB(51, 51, 51))
+		local viewportBorderFrameOuter = Instance.new("UIStroke")
+		viewportBorderFrameOuter.Parent = viewportBorderFrame
+		viewportBorderFrameOuter.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		viewportBorderFrameOuter.LineJoinMode = Enum.LineJoinMode.Miter
+		viewportBorderFrameOuter.Thickness = 1
+		viewportBorderFrameOuter.Color = getTheme("Border", Color3.fromRGB(3, 3, 3))
+		pcall(function() viewportBorderFrameOuter.BorderOffset = UDim.new(0, 1) end)
+
+		local modelTitle = Instance.new("TextLabel")
+		modelTitle.Parent = preview
+		modelTitle.BackgroundTransparency = 1
+		modelTitle.Position = UDim2.fromOffset(PAD + 6, HEADER_H + LINE_H + PAD + 4)
+		modelTitle.Size = UDim2.fromOffset(80, 14)
+		modelTitle.Text = ""
+		modelTitle.TextXAlignment = Enum.TextXAlignment.Left
+		modelTitle.TextSize = 11
+		modelTitle.TextColor3 = getTheme("Text", Color3.fromRGB(208, 207, 227))
+		modelTitle.ZIndex = 65
+		modelTitle.Visible = false
+		applyMenuFont(modelTitle)
+
+		local overlay = Instance.new("Frame")
+		overlay.Parent = preview
+		overlay.Position = viewport.Position
+		overlay.Size = viewport.Size
+		overlay.BackgroundTransparency = 1
+		overlay.BorderSizePixel = 0
+		overlay.Active = true
+		overlay.ZIndex = 60
+
+		local worldModel = Instance.new("WorldModel")
+		worldModel.Parent = viewport
+
+		local cam = Instance.new("Camera")
+		cam.Parent = viewport
+		cam.FieldOfView = 30
+		viewport.CurrentCamera = cam
+
+		local previewModel, basePivot, modelHeight
+		local previewParts, boxParts, originalPartState = {}, {}, {}
+		local previewPartByName = {}
+		local previewRootBase, previewRootOffset
+		local previewClothingState = {}
+		local previewChams, previewChamParts, previewHighlightBoxes = {}, {}, {}
+			previewHighlightShellParts = {}
+		local previewHighlightShellParts = {}
+		local previewChamFrames, previewHighlightFrames = {}, {}
+		local previewWireframe
+		local modelHighlight
+		local previewHighlightObjects = {}
+		local chamModelHighlight
+
+		local bodyNameSet = {
+			Head = true,
+			UpperTorso = true, LowerTorso = true, Torso = true,
+			["Left Arm"] = true, ["Right Arm"] = true, ["Left Leg"] = true, ["Right Leg"] = true,
+			LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
+			RightUpperArm = true, RightLowerArm = true, RightHand = true,
+			LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
+			RightUpperLeg = true, RightLowerLeg = true, RightFoot = true
+		}
+
+		local previewSkeletonOrder = {
+			["LeftFoot"] = "LeftLowerLeg", ["LeftLowerLeg"] = "LeftUpperLeg", ["LeftUpperLeg"] = "LowerTorso",
+			["RightFoot"] = "RightLowerLeg", ["RightLowerLeg"] = "RightUpperLeg", ["RightUpperLeg"] = "LowerTorso",
+			["LeftHand"] = "LeftLowerArm", ["LeftLowerArm"] = "LeftUpperArm", ["LeftUpperArm"] = "UpperTorso",
+			["RightHand"] = "RightLowerArm", ["RightLowerArm"] = "RightUpperArm", ["RightUpperArm"] = "UpperTorso",
+			["LowerTorso"] = "UpperTorso", ["UpperTorso"] = "Head"
+		}
+		local previewSkeletonOrderR6 = {
+			["Left Arm"] = "Torso", ["Right Arm"] = "Torso",
+			["Left Leg"] = "Torso", ["Right Leg"] = "Torso",
+			["Torso"] = "Head"
+		}
+
+		local function makePart(parent, name, size, cf, color, shape)
+			local p = Instance.new("Part")
+			p.Name = name
+			p.Size = size
+			p.CFrame = cf
+			p.Color = color
+			p.Material = Enum.Material.SmoothPlastic
+			p.Anchored = true
+			p.CanCollide = false
+			p.CanTouch = false
+			p.CanQuery = false
+			if shape then p.Shape = shape end
+			p.Parent = parent
+			return p
+		end
+
+		local function buildFallbackRig()
+			local m = Instance.new("Model")
+			m.Name = "PreviewRig"
+			local cBody = Color3.fromRGB(42, 42, 46)
+			local cLimb = Color3.fromRGB(35, 35, 39)
+			makePart(m, "Head", Vector3.new(0.9, 0.9, 0.9), CFrame.new(0, 4.35, 0), cBody, Enum.PartType.Ball)
+			makePart(m, "UpperTorso", Vector3.new(1.2, 1.05, 0.55), CFrame.new(0, 3.35, 0), cBody)
+			makePart(m, "LowerTorso", Vector3.new(1.05, 0.8, 0.52), CFrame.new(0, 2.45, 0), cBody)
+			makePart(m, "LeftUpperArm", Vector3.new(0.38, 0.95, 0.38), CFrame.new(-0.88, 3.35, 0), cLimb)
+			makePart(m, "LeftLowerArm", Vector3.new(0.34, 0.9, 0.34), CFrame.new(-0.88, 2.5, 0), cLimb)
+			makePart(m, "RightUpperArm", Vector3.new(0.38, 0.95, 0.38), CFrame.new(0.88, 3.35, 0), cLimb)
+			makePart(m, "RightLowerArm", Vector3.new(0.34, 0.9, 0.34), CFrame.new(0.88, 2.5, 0), cLimb)
+			makePart(m, "LeftUpperLeg", Vector3.new(0.42, 1.0, 0.42), CFrame.new(-0.32, 1.55, 0), cLimb)
+			makePart(m, "LeftLowerLeg", Vector3.new(0.38, 1.0, 0.38), CFrame.new(-0.32, 0.65, 0), cLimb)
+			makePart(m, "RightUpperLeg", Vector3.new(0.42, 1.0, 0.42), CFrame.new(0.32, 1.55, 0), cLimb)
+			makePart(m, "RightLowerLeg", Vector3.new(0.38, 1.0, 0.38), CFrame.new(0.32, 0.65, 0), cLimb)
+			m.PrimaryPart = m:FindFirstChild("LowerTorso") or m:FindFirstChild("UpperTorso")
+			return m
+		end
+
+		local function cloneCharacterRig()
+			local char = LocalPlayer and LocalPlayer.Character
+			local clone
+			if char then
+				-- Build a fresh avatar from HumanoidDescription so injection while running
+				-- does not freeze the preview in a running animation pose.
+				local hum = char:FindFirstChildOfClass("Humanoid")
+				if hum then
+					pcall(function()
+						local desc = hum:GetAppliedDescription()
+						clone = Players:CreateHumanoidModelFromDescription(desc, hum.RigType or Enum.HumanoidRigType.R15)
+					end)
+				end
+				if not clone then
+					local oldArchivable = char.Archivable
+					pcall(function() char.Archivable = true end)
+					pcall(function() clone = char:Clone() end)
+					pcall(function() char.Archivable = oldArchivable end)
+				end
+			end
+			if not clone then
+				clone = buildFallbackRig()
+			end
+			clone.Name = "PreviewRig"
+
+			for _, d in ipairs(clone:GetDescendants()) do
+				if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript") or d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+					d:Destroy()
+				elseif d:IsA("Humanoid") then
+					pcall(function() d.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None end)
+				elseif d:IsA("BasePart") then
+					-- Do not anchor yet. HumanoidDescription-created rigs need one/two frames
+					-- after parenting to assemble Motor6D joints; anchoring early can leave
+					-- head/torso floating in the preview.
+					d.Anchored = false
+					d.CanCollide = false
+					d.CanTouch = false
+					d.CanQuery = false
+					if d.Name == "HumanoidRootPart" then
+						d.Transparency = 1
+					end
+				end
+			end
+			return clone
+		end
+
+		local function setupPreviewModel()
+			for _, cham in pairs(previewChams) do pcall(function() cham:Destroy() end) end
+			for _, chamPart in pairs(previewChamParts) do pcall(function() chamPart:Destroy() end) end
+			for _, shell in pairs(previewHighlightShellParts) do pcall(function() shell:Destroy() end) end
+			for _, outline in pairs(previewHighlightBoxes) do pcall(function() outline:Destroy() end) end
+			previewParts, boxParts, originalPartState = {}, {}, {}
+			previewClothingState = {}
+			previewPartByName = {}
+			previewRootBase, previewRootOffset = nil, nil
+			previewChams, previewChamParts, previewHighlightBoxes = {}, {}, {}
+			if previewModel then previewModel:Destroy() end
+
+			previewModel = cloneCharacterRig()
+			previewModel.Parent = worldModel
+			for _, child in ipairs(previewModel:GetChildren()) do
+				if child:IsA("Shirt") then
+					previewClothingState[child] = {Property = "ShirtTemplate", Value = child.ShirtTemplate}
+				elseif child:IsA("Pants") then
+					previewClothingState[child] = {Property = "PantsTemplate", Value = child.PantsTemplate}
+				elseif child:IsA("ShirtGraphic") then
+					previewClothingState[child] = {Property = "Graphic", Value = child.Graphic}
+				end
+			end
+			RunService.RenderStepped:Wait()
+			RunService.RenderStepped:Wait()
+			for _, d in ipairs(previewModel:GetDescendants()) do
+				if d:IsA("BasePart") then
+					d.Anchored = true
+					d.CanCollide = false
+					d.CanTouch = false
+					d.CanQuery = false
+					if d.Name == "HumanoidRootPart" then
+						d.Transparency = 1
+					end
+				end
+			end
+
+			local bbCf, bbSize = previewModel:GetBoundingBox()
+			if bbSize.Magnitude < 0.1 then
+				bbSize = Vector3.new(2, 5, 1)
+			end
+			modelHeight = math.max(bbSize.Y, 4)
+			local delta = Vector3.new(0, modelHeight * 0.5, 0) - bbCf.Position
+			previewModel:PivotTo(previewModel:GetPivot() + delta)
+			basePivot = previewModel:GetPivot()
+			-- Raise the preview character a bit so bottom ESP elements fit better.
+			previewModel:PivotTo(basePivot + Vector3.new(0, modelHeight * 0.10, 0))
+			basePivot = previewModel:GetPivot()
+
+			for _, d in ipairs(previewModel:GetDescendants()) do
+				if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+					table.insert(previewParts, d)
+					if bodyNameSet[d.Name] or d.Name == "HumanoidRootPart" then
+						previewPartByName[d.Name] = d
+					end
+					if bodyNameSet[d.Name] then
+						table.insert(boxParts, d)
+					end
+					local meshVertexColors, meshTextures, decalTextures, surfaceAppearances = {}, {}, {}, {}
+					for _, child in ipairs(d:GetChildren()) do
+						if child:IsA("SpecialMesh") then
+							meshVertexColors[child] = child.VertexColor
+							meshTextures[child] = child.TextureId
+						elseif child:IsA("Decal") then
+							decalTextures[child] = child.Texture
+						elseif child:IsA("SurfaceAppearance") then
+							surfaceAppearances[child] = d
+						end
+					end
+					local meshPartTextureId = nil
+					pcall(function() if d:IsA("MeshPart") then meshPartTextureId = d.TextureID end end)
+					originalPartState[d] = {
+						Color = d.Color,
+						Material = d.Material,
+						Transparency = d.Transparency,
+						Reflectance = d.Reflectance,
+						MeshPartTextureID = meshPartTextureId,
+						MeshVertexColors = meshVertexColors,
+						MeshTextures = meshTextures,
+						DecalTextures = decalTextures,
+						SurfaceAppearances = surfaceAppearances
+					}
+
+					-- Same primitive as the real player ESP chams: BoxHandleAdornment.
+					-- Kept in the ViewportFrame world so it rotates with the part.
+					if bodyNameSet[d.Name] then
+						local cham = Instance.new("BoxHandleAdornment")
+						cham.Name = "PreviewCham"
+						cham.Parent = worldModel
+						cham.Adornee = nil
+						cham.Size = d.Size * 0.95
+						cham.Color3 = Color3.new(1, 1, 1)
+						cham.Transparency = 0.45
+						cham.AlwaysOnTop = true
+						cham.ZIndex = 5
+						pcall(function() cham.Shading = Enum.AdornShading.XRayShaded end)
+						previewChams[d] = cham
+
+						-- Fallback cham mesh/part overlay for ViewportFrame; does not edit
+						-- the real preview body, so head/textures stay intact.
+						local chamPart = d:Clone()
+						chamPart.Name = "PreviewChamPart"
+						for _, child in ipairs(chamPart:GetDescendants()) do
+							if child:IsA("Script") or child:IsA("LocalScript") or child:IsA("ModuleScript") or child:IsA("Decal") or child:IsA("Texture") or child:IsA("SurfaceAppearance") or child:IsA("BillboardGui") or child:IsA("SurfaceGui") then
+								child:Destroy()
+							end
+						end
+						pcall(function() if chamPart:IsA("MeshPart") then chamPart.TextureID = "" end end)
+						for _, child in ipairs(chamPart:GetChildren()) do
+							if child:IsA("SpecialMesh") then pcall(function() child.TextureId = "" end) end
+						end
+						chamPart.Anchored = true
+						chamPart.CanCollide = false
+						chamPart.CanTouch = false
+						chamPart.CanQuery = false
+						chamPart.CFrame = d.CFrame
+						chamPart.Transparency = 1
+						chamPart.Parent = worldModel
+						local chamLight = Instance.new("PointLight")
+						chamLight.Name = "PreviewChamLight"
+						chamLight.Enabled = false
+						chamLight.Brightness = 0
+						chamLight.Range = 2.5
+						chamLight.Parent = chamPart
+						previewChamParts[d] = chamPart
+
+						local shell = d:Clone()
+						shell.Name = "PreviewHighlightShell"
+						for _, child in ipairs(shell:GetDescendants()) do
+							if child:IsA("Script") or child:IsA("LocalScript") or child:IsA("ModuleScript") or child:IsA("Decal") or child:IsA("Texture") or child:IsA("SurfaceAppearance") or child:IsA("BillboardGui") or child:IsA("SurfaceGui") then
+								child:Destroy()
+							elseif child:IsA("SpecialMesh") then
+								child.TextureId = ""
+							end
+						end
+						pcall(function() if shell:IsA("MeshPart") then shell.TextureID = "" end end)
+						shell.Anchored = true
+						shell.CanCollide = false
+						shell.CanTouch = false
+						shell.CanQuery = false
+						shell.CFrame = d.CFrame
+						shell.Transparency = 1
+						shell.Parent = worldModel
+						previewHighlightShellParts[d] = shell
+
+						local outline = Instance.new("SelectionBox")
+						outline.Name = "PreviewHighlightOutline"
+						outline.Parent = worldModel
+						outline.Adornee = nil
+						outline.Color3 = Color3.new(1, 1, 1)
+						outline.SurfaceColor3 = Color3.new(1, 1, 1)
+						outline.SurfaceTransparency = 1
+						outline.LineThickness = 0.008
+						previewHighlightBoxes[d] = outline
+					end
+				end
+			end
+			if #boxParts == 0 then
+				for _, p in ipairs(previewParts) do table.insert(boxParts, p) end
+			end
+
+			local cloneRoot = previewModel:FindFirstChild("HumanoidRootPart", true)
+				or previewModel:FindFirstChild("LowerTorso", true)
+				or previewModel:FindFirstChild("Torso", true)
+				or previewModel:FindFirstChild("UpperTorso", true)
+			if cloneRoot and cloneRoot:IsA("BasePart") then
+				previewRootBase = cloneRoot.CFrame
+				previewRootOffset = basePivot:ToObjectSpace(previewRootBase)
+			end
+
+			modelHighlight = Instance.new("Highlight")
+			modelHighlight.Name = "PreviewHighlight"
+			modelHighlight.Parent = previewModel
+			modelHighlight.Adornee = previewModel
+			modelHighlight.Enabled = false
+			modelHighlight.FillTransparency = 1
+			modelHighlight.OutlineTransparency = 0
+			pcall(function() modelHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
+
+			previewHighlightObjects = { modelHighlight }
+			-- Some executors/Roblox builds only render Highlight in ViewportFrame
+			-- when it is parented outside the Adornee model, so try all safe parents.
+			for _, parent in ipairs({worldModel, viewport}) do
+				local h = Instance.new("Highlight")
+				h.Name = "PreviewHighlightAlt"
+				h.Parent = parent
+				h.Adornee = previewModel
+				h.Enabled = false
+				h.FillTransparency = 1
+				h.OutlineTransparency = 0
+				pcall(function() h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
+				table.insert(previewHighlightObjects, h)
+			end
+
+			chamModelHighlight = Instance.new("Highlight")
+			chamModelHighlight.Name = "PreviewChamFill"
+			chamModelHighlight.Parent = previewModel
+			chamModelHighlight.Adornee = previewModel
+			chamModelHighlight.Enabled = false
+			chamModelHighlight.OutlineTransparency = 1
+			chamModelHighlight.FillTransparency = 0.35
+			pcall(function() chamModelHighlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
+
+			previewWireframe = Instance.new("WireframeHandleAdornment")
+			previewWireframe.Name = "PreviewSkeletonWireframe"
+			previewWireframe.Parent = worldModel
+			previewWireframe.Adornee = nil
+			previewWireframe.Color3 = Color3.new(1, 1, 1)
+			previewWireframe.Transparency = 0
+			previewWireframe.AlwaysOnTop = true
+			previewWireframe.CFrame = CFrame.new()
+			previewWireframe.Scale = Vector3.one
+			previewWireframe.Thickness = 0.55
+			pcall(function() previewWireframe.AdornCullingMode = Enum.AdornCullingMode.Automatic end)
+
+			local target = Vector3.new(0, modelHeight * 0.56, 0)
+			local dist = math.max(modelHeight * 3.10, 11.5) -- дальше, чтобы ESP элементы не вылетали за preview
+			cam.CFrame = CFrame.lookAt(target + Vector3.new(0, 0, dist), target)
+		end
+
+		setupPreviewModel()
+
+		local function newLabel(text, size)
+			local l = Instance.new("TextLabel")
+			l.Parent = overlay
+			l.BackgroundTransparency = 1
+			l.BorderSizePixel = 0
+			l.Text = text or ""
+			l.TextSize = size or 11
+			l.TextColor3 = Color3.new(1, 1, 1)
+			l.TextStrokeColor3 = Color3.new(0, 0, 0)
+			l.TextStrokeTransparency = 0.35
+			l.ZIndex = 65
+			applyMenuFont(l)
+			return l
+		end
+
+		local boxOutline = Instance.new("Frame")
+		boxOutline.Parent = overlay
+		boxOutline.BackgroundTransparency = 1
+		boxOutline.BorderSizePixel = 0
+		boxOutline.ZIndex = 62
+		local boxOutlineStroke = Instance.new("UIStroke")
+		boxOutlineStroke.Parent = boxOutline
+		boxOutlineStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		boxOutlineStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		boxOutlineStroke.Thickness = 1
+		boxOutlineStroke.Color = Color3.new(0, 0, 0)
+		boxOutlineStroke.Transparency = 0
+
+		local boxInnerOutline = Instance.new("Frame")
+		boxInnerOutline.Parent = overlay
+		boxInnerOutline.BackgroundTransparency = 1
+		boxInnerOutline.BorderSizePixel = 0
+		boxInnerOutline.ZIndex = 62
+		local boxInnerOutlineStroke = Instance.new("UIStroke")
+		boxInnerOutlineStroke.Parent = boxInnerOutline
+		boxInnerOutlineStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		boxInnerOutlineStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		boxInnerOutlineStroke.Thickness = 1
+		boxInnerOutlineStroke.Color = Color3.new(0, 0, 0)
+		boxInnerOutlineStroke.Transparency = 0
+
+		local boxFrame = Instance.new("Frame")
+		boxFrame.Parent = overlay
+		boxFrame.BackgroundTransparency = 1
+		boxFrame.BorderSizePixel = 0
+		boxFrame.ZIndex = 63
+		local boxStroke = Instance.new("UIStroke")
+		boxStroke.Parent = boxFrame
+		boxStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		boxStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		boxStroke.Thickness = 1
+		boxStroke.Color = Color3.new(1, 1, 1)
+		local boxGradient = Instance.new("UIGradient")
+		boxGradient.Parent = boxStroke
+
+		local healthHolder = Instance.new("Frame")
+		healthHolder.Parent = overlay
+		healthHolder.BackgroundColor3 = Color3.new(0, 0, 0)
+		healthHolder.BorderSizePixel = 0
+		healthHolder.ZIndex = 64
+		local healthStroke = Instance.new("UIStroke")
+		healthStroke.Parent = healthHolder
+		healthStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		healthStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		healthStroke.Thickness = 1
+		healthStroke.Color = Color3.new(0, 0, 0)
+		local healthFill = Instance.new("Frame")
+		healthFill.Parent = healthHolder
+		healthFill.AnchorPoint = Vector2.new(0, 1)
+		healthFill.Position = UDim2.new(0, 1, 1, -1)
+		healthFill.Size = UDim2.new(1, -2, 0.73, -2)
+		healthFill.BorderSizePixel = 0
+		healthFill.BackgroundColor3 = Color3.new(1, 1, 1)
+		healthFill.ZIndex = 65
+		local healthGradient = Instance.new("UIGradient")
+		healthGradient.Rotation = 90
+		healthGradient.Parent = healthFill
+
+		local nameLabel = newLabel("Enemy", 12)
+		local distanceLabel = newLabel("48m", 12)
+		local weaponLabel = newLabel("AK-47", 12)
+		local healthTextLabel = newLabel("100", 12)
+
+		local flagHolder = Instance.new("Frame")
+		flagHolder.Parent = overlay
+		flagHolder.BackgroundTransparency = 1
+		flagHolder.BorderSizePixel = 0
+		flagHolder.ZIndex = 65
+		local flagLayout = Instance.new("UIListLayout")
+		flagLayout.Parent = flagHolder
+		flagLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		flagLayout.Padding = UDim.new(0, 0)
+		local previewFlagLabels = {}
+		for i, flagText in ipairs({"TARGET", "TEAM", "FF"}) do
+			local fl = Instance.new("TextLabel")
+			fl.Parent = flagHolder
+			fl.BackgroundTransparency = 1
+			fl.BorderSizePixel = 0
+			fl.Text = flagText
+			fl.TextSize = 9
+			fl.TextXAlignment = Enum.TextXAlignment.Left
+			fl.TextStrokeTransparency = 0
+			fl.Size = UDim2.new(1, 0, 0, 10)
+			fl.ZIndex = 65
+			local okFont = pcall(function() if Fonts and Fonts.Get then fl.FontFace = Fonts.Get("SmallestPixel7") end end)
+			if not okFont then applyMenuFont(fl) end
+			previewFlagLabels[i] = fl
+		end
+
+		local highlightFrame = Instance.new("Frame")
+		highlightFrame.Parent = overlay
+		highlightFrame.BackgroundTransparency = 1
+		highlightFrame.BorderSizePixel = 0
+		highlightFrame.ZIndex = 67
+		highlightFrame.Visible = false
+		local highlightFrameStroke = Instance.new("UIStroke")
+		highlightFrameStroke.Parent = highlightFrame
+		highlightFrameStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		highlightFrameStroke.LineJoinMode = Enum.LineJoinMode.Miter
+		highlightFrameStroke.Thickness = 1
+
+		-- 2D per-body-part fallback overlays for chams/highlight. They make
+		-- preview styling visible even when Roblox adornments do not render in ViewportFrame.
+		for _, part in ipairs(previewParts) do
+			if bodyNameSet[part.Name] then
+				local chamFrame = Instance.new("Frame")
+				chamFrame.Parent = overlay
+				chamFrame.BorderSizePixel = 0
+				chamFrame.BackgroundColor3 = Color3.new(1, 1, 1)
+				chamFrame.BackgroundTransparency = 1
+				chamFrame.Visible = false
+				chamFrame.ZIndex = 61
+				previewChamFrames[part] = chamFrame
+
+				local hlFrame = Instance.new("Frame")
+				hlFrame.Parent = overlay
+				hlFrame.BorderSizePixel = 0
+				hlFrame.BackgroundTransparency = 1
+				hlFrame.Visible = false
+				hlFrame.ZIndex = 68
+				local hlStroke = Instance.new("UIStroke")
+				hlStroke.Parent = hlFrame
+				hlStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				hlStroke.LineJoinMode = Enum.LineJoinMode.Miter
+				hlStroke.Thickness = 1
+				previewHighlightFrames[part] = {Frame = hlFrame, Stroke = hlStroke}
+			end
+		end
+
+		local skeletonLines = {}
+		for _ = 1, 18 do
+			local line = Instance.new("Frame")
+			line.Parent = overlay
+			line.AnchorPoint = Vector2.new(0.5, 0.5)
+			line.BackgroundColor3 = Color3.new(1, 1, 1)
+			line.BorderSizePixel = 0
+			line.ZIndex = 66
+			line.Visible = false
+			table.insert(skeletonLines, line)
+		end
+
+		local highlightHullLines = {}
+		for _ = 1, 96 do
+			local line = Instance.new("Frame")
+			line.Parent = overlay
+			line.AnchorPoint = Vector2.new(0.5, 0.5)
+			line.BackgroundColor3 = Color3.new(1, 1, 1)
+			line.BorderSizePixel = 0
+			line.ZIndex = 69
+			line.Visible = false
+			table.insert(highlightHullLines, line)
+		end
+
+		local arrowLabel = newLabel("▲", 18)
+		arrowLabel.TextStrokeTransparency = 0.2
+		arrowLabel.Visible = false
+
+		local function clampAlpha(v)
+			if type(v) ~= "number" then return 0 end
+			return math.clamp(v, 0, 1)
+		end
+
+		local function scaledColor(c, f)
+			return Color3.new(math.clamp(c.R * f, 0, 1), math.clamp(c.G * f, 0, 1), math.clamp(c.B * f, 0, 1))
+		end
+
+		local function atan2(y, x)
+			if math.atan2 then return math.atan2(y, x) end
+			if x > 0 then return math.atan(y / x) end
+			if x < 0 and y >= 0 then return math.atan(y / x) + math.pi end
+			if x < 0 and y < 0 then return math.atan(y / x) - math.pi end
+			if x == 0 and y > 0 then return math.pi / 2 end
+			if x == 0 and y < 0 then return -math.pi / 2 end
+			return 0
+		end
+
+		local skeletonXCenter = nil
+		local SKELETON_X_SCALE = 0.68
+
+		local function setLine(line, a, b, color, transparency, visible)
+			if not a or not b then
+				line.Visible = false
+				return
+			end
+			if skeletonXCenter then
+				a = Vector2.new(skeletonXCenter + (a.X - skeletonXCenter) * SKELETON_X_SCALE, a.Y)
+				b = Vector2.new(skeletonXCenter + (b.X - skeletonXCenter) * SKELETON_X_SCALE, b.Y)
+			end
+			local dx, dy = b.X - a.X, b.Y - a.Y
+			local len = math.sqrt(dx * dx + dy * dy)
+			line.Visible = visible and len > 1
+			if not line.Visible then return end
+			line.Position = UDim2.fromOffset((a.X + b.X) * 0.5, (a.Y + b.Y) * 0.5)
+			line.Size = UDim2.fromOffset(len, 1)
+			line.Rotation = math.deg(atan2(dy, dx))
+			line.BackgroundColor3 = color
+			line.BackgroundTransparency = transparency
+		end
+
+		local function projectPoint(worldPos)
+			local size = overlay.AbsoluteSize
+			if size.X <= 0 or size.Y <= 0 then return nil end
+			local rel = cam.CFrame:PointToObjectSpace(worldPos)
+			local z = -rel.Z
+			if z <= 0.05 then return nil end
+			local f = 1 / math.tan(math.rad(cam.FieldOfView) * 0.5)
+			local aspect = size.X / math.max(size.Y, 1)
+			local ndcX = (rel.X / z) * f / aspect
+			local ndcY = (rel.Y / z) * f
+			return Vector2.new((ndcX * 0.5 + 0.5) * size.X, (0.5 - ndcY * 0.5) * size.Y), z
+		end
+
+		local function getProjectedBox()
+			local minX, minY = math.huge, math.huge
+			local maxX, maxY = -math.huge, -math.huge
+			local count = 0
+			for _, part in ipairs(boxParts) do
+				if part and part.Parent then
+					local cf = part.CFrame
+					local hs = part.Size * 0.5
+					for sx = -1, 1, 2 do
+						for sy = -1, 1, 2 do
+							for sz = -1, 1, 2 do
+								local screen = projectPoint((cf * CFrame.new(hs.X * sx, hs.Y * sy, hs.Z * sz)).Position)
+								if screen then
+									minX = math.min(minX, screen.X)
+									minY = math.min(minY, screen.Y)
+									maxX = math.max(maxX, screen.X)
+									maxY = math.max(maxY, screen.Y)
+									count += 1
+								end
+							end
+						end
+					end
+				end
+			end
+			if count == 0 then return nil end
+			local w, h = maxX - minX, maxY - minY
+			if w < 2 or h < 2 then return nil end
+			return minX, minY, w, h, maxX, maxY
+		end
+
+		local function getProjectedPartBox(part)
+			if not (part and part.Parent) then return nil end
+			local minX, minY = math.huge, math.huge
+			local maxX, maxY = -math.huge, -math.huge
+			local count = 0
+			local cf = part.CFrame
+			local hs = part.Size * 0.5
+			for sx = -1, 1, 2 do
+				for sy = -1, 1, 2 do
+					for sz = -1, 1, 2 do
+						local screen = projectPoint((cf * CFrame.new(hs.X * sx, hs.Y * sy, hs.Z * sz)).Position)
+						if screen then
+							minX = math.min(minX, screen.X)
+							minY = math.min(minY, screen.Y)
+							maxX = math.max(maxX, screen.X)
+							maxY = math.max(maxY, screen.Y)
+							count += 1
+						end
+					end
+				end
+			end
+			if count == 0 then return nil end
+			local w, h = maxX - minX, maxY - minY
+			if w < 1 or h < 1 then return nil end
+			return minX, minY, w, h
+		end
+
+		local function getProjectedBodyOutlineSegments()
+			local rects = {}
+			for _, part in ipairs(boxParts) do
+				if part and part.Parent then
+					local x, y, w, h = getProjectedPartBox(part)
+					if x and w > 1 and h > 1 then
+						-- A tiny expansion makes the pieces touch more like one body outline.
+						table.insert(rects, {x = x - 1, y = y - 1, w = w + 2, h = h + 2})
+					end
+				end
+			end
+			if #rects == 0 then return nil end
+
+			local function insideAny(px, py, ignore)
+				for i, r in ipairs(rects) do
+					if i ~= ignore and px >= r.x and px <= r.x + r.w and py >= r.y and py <= r.y + r.h then
+						return true
+					end
+				end
+				return false
+			end
+
+			local segments = {}
+			local function addEdge(a, b, normal, idx)
+				-- Draw only edges that are on the outside of the union-ish body shape.
+				-- Multiple samples reduce small internal seams while keeping a humanoid contour,
+				-- not a big oval/convex hull.
+				local outside = 0
+				for s = 1, 5 do
+					local t = s / 6
+					local px = a.X + (b.X - a.X) * t + normal.X * 2
+					local py = a.Y + (b.Y - a.Y) * t + normal.Y * 2
+					if not insideAny(px, py, idx) then outside += 1 end
+				end
+				if outside >= 3 then
+					table.insert(segments, {a, b})
+				end
+			end
+
+			for i, r in ipairs(rects) do
+				local x1, y1, x2, y2 = r.x, r.y, r.x + r.w, r.y + r.h
+				addEdge(Vector2.new(x1, y1), Vector2.new(x2, y1), Vector2.new(0, -1), i) -- top
+				addEdge(Vector2.new(x2, y1), Vector2.new(x2, y2), Vector2.new(1, 0), i)  -- right
+				addEdge(Vector2.new(x2, y2), Vector2.new(x1, y2), Vector2.new(0, 1), i)  -- bottom
+				addEdge(Vector2.new(x1, y2), Vector2.new(x1, y1), Vector2.new(-1, 0), i) -- left
+			end
+			return (#segments > 0) and segments or nil
+		end
+
+
+		local function findPart(...)
+			for i = 1, select("#", ...) do
+				local name = select(i, ...)
+				local p = previewModel and previewModel:FindFirstChild(name, true)
+				if p and p:IsA("BasePart") then return p end
+			end
+			return nil
+		end
+
+		local function screenOfPart(...)
+			local p = findPart(...)
+			return p and projectPoint(p.Position) or nil
+		end
+
+		local function findSourcePart(name)
+			local char = LocalPlayer and LocalPlayer.Character
+			local p = char and char:FindFirstChild(name, true)
+			return (p and p:IsA("BasePart")) and p or nil
+		end
+
+		local function updatePreviewPose(currentPivot)
+			local char = LocalPlayer and LocalPlayer.Character
+			local sourceRoot = char and (char:FindFirstChild("HumanoidRootPart", true)
+				or char:FindFirstChild("LowerTorso", true)
+				or char:FindFirstChild("Torso", true)
+				or char:FindFirstChild("UpperTorso", true))
+			if not (sourceRoot and sourceRoot:IsA("BasePart") and previewRootOffset) then
+				if previewModel then previewModel:PivotTo(currentPivot) end
+				return
+			end
+
+			local currentRootCf = currentPivot * previewRootOffset
+			for name, dst in pairs(previewPartByName) do
+				if dst and dst.Parent then
+					local src = findSourcePart(name)
+					if src then
+						dst.CFrame = currentRootCf * sourceRoot.CFrame:ToObjectSpace(src.CFrame)
+						if name == "HumanoidRootPart" then dst.Transparency = 1 end
+					end
+				end
+			end
+		end
+
+		local function getSkeletonSegments()
+			local segments = {}
+			local order = findPart("UpperTorso") and previewSkeletonOrder or previewSkeletonOrderR6
+			for partName, parentName in pairs(order) do
+				local a = screenOfPart(partName)
+				local b = screenOfPart(parentName)
+				if a and b then
+					table.insert(segments, {a, b})
+				end
+			end
+			return segments
+		end
+
+		local function buildShimmerSeq(p, w, baseColor, intensity)
+			intensity = math.clamp(intensity or 0.65, 0, 1)
+			local white = Color3.fromRGB(255, 255, 255)
+			local half = math.max(w * 0.5, 0.02)
+			local left = math.clamp(p - half, 0, 1)
+			local right = math.clamp(p + half, 0, 1)
+			local peak = baseColor:Lerp(white, intensity)
+			local kp = {ColorSequenceKeypoint.new(0, baseColor)}
+			if left > 0.001 then table.insert(kp, ColorSequenceKeypoint.new(left, baseColor)) end
+			if p > 0.001 and p < 0.999 then table.insert(kp, ColorSequenceKeypoint.new(math.clamp(p, 0.0011, 0.9989), peak)) end
+			if right < 0.999 then table.insert(kp, ColorSequenceKeypoint.new(right, baseColor)) end
+			table.insert(kp, ColorSequenceKeypoint.new(1, baseColor))
+			table.sort(kp, function(a, b) return a.Time < b.Time end)
+			local cleaned = {kp[1]}
+			for i = 2, #kp do
+				if kp[i].Time - cleaned[#cleaned].Time > 0.0005 then table.insert(cleaned, kp[i]) end
+			end
+			if #cleaned < 2 then cleaned = {ColorSequenceKeypoint.new(0, baseColor), ColorSequenceKeypoint.new(1, baseColor)} end
+			return ColorSequence.new(cleaned)
+		end
+
+		local dragging = false
+		local lastInputX, lastInputY = 0, 0
+		local defaultYaw = math.pi -- front-facing default; Roblox avatars face -Z
+		local angle, pitch = defaultYaw, 0
+		local lastTouch = 0
+		local didDrag = false
+		local resetting, resetStartAngle, resetStartPitch, resetStartTime = false, 0, 0, 0
+		local smoothedBox = nil
+
+		local function beginPreviewDrag(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				resetting = false
+				didDrag = false
+				lastInputX = input.Position.X
+				lastInputY = input.Position.Y
+			end
+		end
+
+		connect(viewport.InputBegan, beginPreviewDrag)
+		connect(overlay.InputBegan, beginPreviewDrag)
+
+		connect(UserInputService.InputChanged, function(input)
+			if not dragging then return end
+			if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+			local x, y = input.Position.X, input.Position.Y
+			local dx, dy = x - lastInputX, y - lastInputY
+			if math.abs(dx) > 0.5 or math.abs(dy) > 0.5 then
+				didDrag = true
+				angle = angle + dx * 0.012
+				pitch = pitch + dy * 0.010
+				lastTouch = tick()
+			end
+			lastInputX, lastInputY = x, y
+		end)
+
+		connect(UserInputService.InputEnded, function(input)
+			if not dragging then return end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+				if didDrag then
+					lastTouch = tick()
+				else
+					resetting = true
+					resetStartAngle, resetStartPitch = angle, pitch
+					resetStartTime = tick()
+					lastTouch = tick()
+				end
+			end
+		end)
+
+		local function updatePreviewClothing(hidden)
+			for obj, data in pairs(previewClothingState) do
+				if obj and obj.Parent then
+					pcall(function() obj[data.Property] = hidden and "" or data.Value end)
+				end
+			end
+		end
+
+		local function applyPreviewChams(settings)
+			local chamsOn = settings and settings.chams
+			local style = (settings and settings.chams_style) or "Glow"
+			local base = (settings and settings.chams_color and settings.chams_color[1]) or getAccent()
+			local alpha = (settings and settings.chams_color and settings.chams_color[2]) or 0
+			local now = tick()
+			updatePreviewClothing(chamsOn)
+
+			local function selfChamVisual(part)
+				local color = base
+				local targetTransparency = alpha or 0
+				local reflectance = 0
+				local material = Enum.Material.SmoothPlastic
+
+				-- Same logic as apply_self_cham_to_part(). This changes the preview
+				-- model material/color directly instead of relying on adornments.
+				if style == "Glow" then
+					material = Enum.Material.Neon
+					color = scaledColor(base, 1.65)
+					targetTransparency = 0
+				elseif style == "Wireframe" then
+					material = Enum.Material.ForceField
+					targetTransparency = 0.7
+				elseif style == "ForceField" then
+					material = Enum.Material.ForceField
+				elseif style == "Flat" then
+					material = Enum.Material.SmoothPlastic
+					targetTransparency = 0
+				elseif style == "Glass" then
+					material = Enum.Material.Glass
+					targetTransparency = 0.58
+					reflectance = 0.65
+				elseif style == "Pulse" then
+					material = Enum.Material.Neon
+					local wave = (math.sin(now * 1.0) + 1) * 0.5
+					local pulse = 1.0 + (1 - wave) * 0.15
+					color = Color3.new(
+						math.clamp(base.R * pulse, 0, 1),
+						math.clamp(base.G * pulse, 0, 1),
+						math.clamp(base.B * pulse, 0, 1)
+					)
+					targetTransparency = 0.25 + wave * 0.50
+				elseif style == "Rainbow" then
+					material = Enum.Material.Neon
+					color = Color3.fromHSV((now * 0.03) % 1, 0.75, 1)
+					targetTransparency = 0.28
+				end
+
+				return color, targetTransparency, material, reflectance
+			end
+
+			local previewChamColor, previewChamAlpha = selfChamVisual(nil)
+			if chamModelHighlight then
+				local glowing = chamsOn and (style == "Glow" or style == "Pulse" or style == "Rainbow")
+				chamModelHighlight.Enabled = glowing
+				chamModelHighlight.FillColor = previewChamColor
+				if style == "Pulse" then
+					local pulseWave = (math.sin(now * 1.0) + 1) * 0.5
+					-- Whole-character pulse overlay so head/body pulse together.
+					chamModelHighlight.FillTransparency = 0.65 + pulseWave * 0.25
+				else
+					chamModelHighlight.FillTransparency = (style == "Glow") and 0.16 or 0.22
+				end
+			end
+
+			for _, part in ipairs(previewParts) do
+				local orig = originalPartState[part]
+				if not part or not part.Parent or not orig then
+					continue
+				end
+
+				-- Do not use old overlay/adornment cham fallback here: preview chams
+				-- should behave like self chams by changing the preview part itself.
+				local cham = previewChams[part]
+				local chamPart = previewChamParts[part]
+				if cham then cham.Adornee = nil end
+				if chamPart then chamPart.Transparency = 1 end
+
+				if not chamsOn then
+					part.Color = orig.Color
+					part.Material = orig.Material
+					part.Transparency = orig.Transparency
+					pcall(function() part.Reflectance = orig.Reflectance or 0 end)
+					pcall(function() if part:IsA("MeshPart") and orig.MeshPartTextureID ~= nil then part.TextureID = orig.MeshPartTextureID end end)
+					if orig.MeshVertexColors then
+						for mesh, vertex in pairs(orig.MeshVertexColors) do
+							if mesh and mesh.Parent then pcall(function() mesh.VertexColor = vertex end) end
+						end
+					end
+					if orig.MeshTextures then
+						for mesh, textureId in pairs(orig.MeshTextures) do
+							if mesh and mesh.Parent then pcall(function() mesh.TextureId = textureId end) end
+						end
+					end
+					if orig.DecalTextures then
+						for decal, texture in pairs(orig.DecalTextures) do
+							if decal then pcall(function() decal.Texture = texture; decal.Parent = part end) end
+						end
+					end
+					if orig.SurfaceAppearances then
+						for surf, parent in pairs(orig.SurfaceAppearances) do
+							if surf then pcall(function() surf.Parent = parent or part end) end
+						end
+					end
+					continue
+				end
+
+				local color, targetTransparency, material, reflectance = selfChamVisual(part)
+				part.Material = material
+				part.Color = color
+				part.Transparency = targetTransparency
+				pcall(function() part.Reflectance = reflectance end)
+				pcall(function() if part:IsA("MeshPart") then part.TextureID = "" end end)
+
+				-- VertexColor tints meshes the same way self chams does.
+				for _, child in ipairs(part:GetChildren()) do
+					if child:IsA("SpecialMesh") then
+						pcall(function() child.VertexColor = Vector3.new(color.R, color.G, color.B) end)
+						pcall(function() child.TextureId = "" end)
+					elseif child:IsA("Decal") then
+						pcall(function() child.Texture = "" end)
+					elseif child:IsA("SurfaceAppearance") then
+						pcall(function() child.Parent = nil end)
+					end
+				end
+
+				-- No extra cloned shell over the preview character: it made Pulse/Glow look wrong.
+				-- Preview chams use self-chams logic directly on the preview model.
+				if chamPart then
+					chamPart.Transparency = 1
+					local light = chamPart:FindFirstChild("PreviewChamLight")
+					if light then light.Enabled = false end
+				end
+			end
+		end
+
+		local function getPreviewChamVisual(settings)
+			local style = (settings and settings.chams_style) or "Glow"
+			local base = (settings and settings.chams_color and settings.chams_color[1]) or getAccent()
+			local glow = (settings and settings.chams_glow_factor) or 2
+			local color = base
+			local transparency = 0.35
+			local material = Enum.Material.Neon
+			if style == "Glow" then
+				color = scaledColor(base, math.max(glow, 1))
+				transparency = 0.22
+				material = Enum.Material.Neon
+			elseif style == "Flat" then
+				transparency = 0.12
+				material = Enum.Material.SmoothPlastic
+			elseif style == "ForceField" then
+				local wave = (math.sin(tick() * 4.2) + 1) * 0.5
+				color = scaledColor(base, 1.35 + wave * 0.45)
+				transparency = 0.28
+				material = Enum.Material.ForceField
+			elseif style == "Glass" then
+				color = scaledColor(base, 1.35)
+				transparency = 0.48
+				material = Enum.Material.Glass
+			elseif style == "Pulse" then
+				local wave = (math.sin(tick() * 3.0) + 1) * 0.5
+				color = scaledColor(base, 1 + (1 - wave) * 0.55)
+				transparency = 0.22 + wave * 0.25
+				material = Enum.Material.Neon
+			elseif style == "Rainbow" then
+				color = Color3.fromHSV((tick() * 0.14) % 1, 0.8, 1)
+				transparency = 0.22
+				material = Enum.Material.Neon
+			end
+			return color, math.clamp(transparency, 0, 1), material
+		end
+
+		connect(RunService.RenderStepped, function(dt)
+			dt = math.min(dt or (1 / 60), 0.1)
+			local outline = newWindow.Items and newWindow.Items["Outline"] and newWindow.Items["Outline"].Instance
+			local current = newWindow.Current
+			local isVisuals = current and current.Name == "Visuals"
+			local isOpen = newWindow.IsOpen and outline and outline.Parent
+			preview.Visible = not not (isOpen and isVisuals)
+
+			local accent = getAccent()
+			local shimmerT = ((tick() * 0.18) % 1)
+			local shimmerPos = (shimmerT < 0.5) and (shimmerT * 2) or (2 - shimmerT * 2)
+			topLine.BackgroundColor3 = Color3.new(1, 1, 1)
+			topLineGradient.Color = buildShimmerSeq(shimmerPos, 0.85, accent, 0.65)
+			preview.BackgroundColor3 = getTheme("Background", Color3.fromRGB(12, 12, 12))
+			previewOutlineStroke.Transparency = 1
+			previewBorderStroke.Transparency = 1
+			viewport.BackgroundColor3 = getTheme("Inline", Color3.fromRGB(19, 19, 19))
+			viewportOutlineStroke.Color = getTheme("Outline", Color3.fromRGB(51, 51, 51))
+			viewportBorderStroke.Color = getTheme("Border", Color3.fromRGB(3, 3, 3))
+			viewportBorderFrameOutline.Color = getTheme("Outline", Color3.fromRGB(51, 51, 51))
+			viewportBorderFrameOuter.Color = getTheme("Border", Color3.fromRGB(3, 3, 3))
+			title.TextColor3 = getTheme("Text", Color3.fromRGB(208, 207, 227))
+			modelTitle.TextColor3 = getTheme("Text", Color3.fromRGB(208, 207, 227))
+
+			if outline and outline.Parent then
+				local abs = outline.AbsolutePosition
+				local size = outline.AbsoluteSize
+				local viewportSize = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+				local px = abs.X + size.X + 8
+				local py = abs.Y + (size.Y - PREVIEW_H) * 0.5 + 16 -- чуть ниже центра меню
+				if px + PREVIEW_W > viewportSize.X - 4 then
+					px = math.max(4, abs.X - PREVIEW_W - 8)
+				end
+				py = math.clamp(py, 4, math.max(4, viewportSize.Y - PREVIEW_H - 4))
+				preview.Position = UDim2.fromOffset(px, py)
+			end
+
+			if not preview.Visible then
+				return
+			end
+
+			if resetting then
+				local a = math.clamp((tick() - resetStartTime) / 0.35, 0, 1)
+				a = 1 - (1 - a) * (1 - a)
+				angle = resetStartAngle + (defaultYaw - resetStartAngle) * a
+				pitch = resetStartPitch + (0 - resetStartPitch) * a
+				if a >= 1 then resetting = false; angle, pitch = defaultYaw, 0 end
+			elseif not dragging and (tick() - lastTouch) > 2.5 then
+				angle = angle + dt * 0.42
+			end
+			if previewModel and previewModel.Parent and basePivot then
+				-- Static preview pose: no live running/animation copying, only rotation.
+				previewModel:PivotTo(basePivot * CFrame.Angles(pitch, angle, 0))
+			end
+
+			local settings = cheat and cheat.EspLibrary and cheat.EspLibrary.settings and cheat.EspLibrary.settings.enemy
+			if not settings then return end
+
+			applyPreviewChams(settings)
+
+			local hOn = not not settings.highlight
+			local hColor = (settings.highlight_color and settings.highlight_color[1]) or accent
+			local hAlpha = clampAlpha(settings.highlight_color and settings.highlight_color[2])
+			local hOutline = scaledColor(hColor, 2.25)
+			for _, h in ipairs(previewHighlightObjects) do
+				if h then
+					h.Enabled = hOn
+					h.Adornee = hOn and previewModel or nil
+					h.OutlineColor = hOutline
+					h.FillColor = hColor
+					h.OutlineTransparency = 0
+					h.FillTransparency = 1
+					pcall(function() h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop end)
+				end
+			end
+			-- Real highlight only. Do not enable SelectionBox/shell fallback here:
+			-- those create separate square/filled shapes instead of one continuous outline.
+			for _, outlineBox in pairs(previewHighlightBoxes) do
+				if outlineBox then outlineBox.Adornee = nil end
+			end
+			for _, shell in pairs(previewHighlightShellParts) do
+				if shell then shell.Transparency = 1 end
+			end
+
+			local minX, minY, boxW, boxH, maxX, maxY = getProjectedBox()
+			if minX then
+				local lerpA = 1 - math.exp(-math.min(dt or 1 / 60, 0.1) * 13)
+				if not smoothedBox then
+					smoothedBox = {minX, minY, boxW, boxH, maxX, maxY}
+				else
+					smoothedBox[1] = smoothedBox[1] + (minX - smoothedBox[1]) * lerpA
+					smoothedBox[2] = smoothedBox[2] + (minY - smoothedBox[2]) * lerpA
+					smoothedBox[3] = smoothedBox[3] + (boxW - smoothedBox[3]) * lerpA
+					smoothedBox[4] = smoothedBox[4] + (boxH - smoothedBox[4]) * lerpA
+					smoothedBox[5] = smoothedBox[5] + (maxX - smoothedBox[5]) * lerpA
+					smoothedBox[6] = smoothedBox[6] + (maxY - smoothedBox[6]) * lerpA
+				end
+				minX, minY, boxW, boxH, maxX, maxY = smoothedBox[1], smoothedBox[2], smoothedBox[3], smoothedBox[4], smoothedBox[5], smoothedBox[6]
+			end
+			if not minX then
+				smoothedBox = nil
+				boxOutline.Visible = false
+				boxInnerOutline.Visible = false
+				boxFrame.Visible = false
+				healthHolder.Visible = false
+				nameLabel.Visible = false
+				distanceLabel.Visible = false
+				weaponLabel.Visible = false
+				healthTextLabel.Visible = false
+				flagHolder.Visible = false
+				highlightFrame.Visible = false
+				for _, f in pairs(previewChamFrames) do f.Visible = false end
+				for _, data in pairs(previewHighlightFrames) do data.Frame.Visible = false end
+				for _, shell in pairs(previewHighlightShellParts) do shell.Transparency = 1 end
+				if chamModelHighlight then chamModelHighlight.Enabled = false end
+				if previewWireframe then previewWireframe.Adornee = nil end
+				skeletonXCenter = nil
+				for _, line in ipairs(skeletonLines) do line.Visible = false end
+				for _, line in ipairs(highlightHullLines) do line.Visible = false end
+				return
+			end
+
+			boxOutline.Position = UDim2.fromOffset(minX, minY)
+			boxOutline.Size = UDim2.fromOffset(boxW, boxH)
+			boxFrame.Position = UDim2.fromOffset(minX + 1, minY + 1)
+			boxFrame.Size = UDim2.fromOffset(math.max(0, boxW - 2), math.max(0, boxH - 2))
+			boxInnerOutline.Position = UDim2.fromOffset(minX + 2, minY + 2)
+			boxInnerOutline.Size = UDim2.fromOffset(math.max(0, boxW - 4), math.max(0, boxH - 4))
+			-- Highlight must outline the character only, not the projected box.
+			highlightFrame.Visible = false
+
+			-- No 2D cham squares/overlays. Chams are applied directly to the preview model.
+			for _, frame in pairs(previewChamFrames) do
+				frame.Visible = false
+			end
+			-- No fake 2D highlight lines: only Roblox Highlight above.
+			for _, data in pairs(previewHighlightFrames) do data.Frame.Visible = false end
+			for _, line in ipairs(highlightHullLines) do line.Visible = false end
+
+			boxOutline.Visible = settings.box
+			boxFrame.Visible = settings.box
+			boxInnerOutline.Visible = settings.box
+			boxStroke.Transparency = clampAlpha(settings.box_color and settings.box_color[3])
+			boxGradient.Rotation = (settings.box_rotation or 0) + ((settings.main_settings and settings.main_settings.gradient_spin) and (tick() * ((settings.main_settings and settings.main_settings.gradient_speed) or 360) % 360) or 0)
+			boxGradient.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, (settings.box_color and settings.box_color[1]) or Color3.new(1, 1, 1)),
+				ColorSequenceKeypoint.new(1, (settings.box_color and settings.box_color[2]) or Color3.new(1, 1, 1))
+			})
+
+			healthHolder.Visible = settings.health_bar
+			healthHolder.Position = UDim2.fromOffset(minX - 5, minY)
+			healthHolder.Size = UDim2.fromOffset(1, boxH)
+			healthGradient.Color = ColorSequence.new({
+				ColorSequenceKeypoint.new(0, (settings.health_bar_color and settings.health_bar_color[1]) or Color3.new(0, 1, 0)),
+				ColorSequenceKeypoint.new(1, (settings.health_bar_color and settings.health_bar_color[2]) or Color3.new(1, 0, 0))
+			})
+			local hpCycle = (tick() * 0.42) % 2
+			local hpFrac = (hpCycle <= 1) and (1 - hpCycle) or (hpCycle - 1)
+			healthFill.Size = UDim2.new(1, -2, hpFrac, 0)
+			healthTextLabel.Text = tostring(math.max(0, math.floor(hpFrac * 100 + 0.5)))
+
+			nameLabel.Visible = settings.name
+			nameLabel.TextColor3 = (settings.name_color and settings.name_color[1]) or Color3.new(1, 1, 1)
+			nameLabel.TextTransparency = clampAlpha(settings.name_color and settings.name_color[2])
+			nameLabel.Position = UDim2.fromOffset(minX - 30, minY - 16)
+			nameLabel.Size = UDim2.fromOffset(boxW + 60, 14)
+
+			distanceLabel.Visible = settings.distance
+			distanceLabel.TextColor3 = (settings.distance_color and settings.distance_color[1]) or Color3.new(1, 1, 1)
+			distanceLabel.TextTransparency = clampAlpha(settings.distance_color and settings.distance_color[2])
+			distanceLabel.Position = UDim2.fromOffset(minX - 25, maxY + 2)
+			distanceLabel.Size = UDim2.fromOffset(boxW + 50, 14)
+
+			weaponLabel.Visible = settings.weapon
+			weaponLabel.TextColor3 = (settings.weapon_color and settings.weapon_color[1]) or Color3.new(1, 1, 1)
+			weaponLabel.TextTransparency = clampAlpha(settings.weapon_color and settings.weapon_color[2])
+			weaponLabel.Position = UDim2.fromOffset(minX - 25, maxY + (settings.distance and 15 or 2))
+			weaponLabel.Size = UDim2.fromOffset(boxW + 50, 14)
+
+			healthTextLabel.Visible = settings.health_text
+			healthTextLabel.TextColor3 = (settings.health_text_color and settings.health_text_color[1]) or Color3.new(1, 1, 1)
+			healthTextLabel.TextTransparency = clampAlpha(settings.health_text_color and settings.health_text_color[2])
+			healthTextLabel.Position = UDim2.fromOffset(minX - 35, minY + math.clamp(boxH * (1 - hpFrac) - 6, 0, boxH - 8))
+			healthTextLabel.Size = UDim2.fromOffset(28, 12)
+
+			flagHolder.Visible = settings.flags
+			flagHolder.Position = UDim2.fromOffset(maxX + 3, minY - 4)
+			flagHolder.Size = UDim2.fromOffset(70, boxH)
+			for _, fl in ipairs(previewFlagLabels) do
+				fl.TextColor3 = (settings.flags_color and settings.flags_color[1]) or Color3.new(1, 1, 1)
+				fl.TextTransparency = clampAlpha(settings.flags_color and settings.flags_color[2])
+				fl.Visible = settings.flags
+			end
+
+			local skColor = (settings.skeleton_color and settings.skeleton_color[1]) or Color3.new(1, 1, 1)
+			local skTrans = clampAlpha(settings.skeleton_color and settings.skeleton_color[2])
+			local skVisible = not not settings.skeleton
+			skeletonXCenter = (minX + maxX) * 0.5
+			for _, line in ipairs(skeletonLines) do line.Visible = false end
+			if previewWireframe then
+				previewWireframe.Color3 = skColor
+				previewWireframe.Transparency = skTrans
+				previewWireframe.Thickness = 0.55
+				pcall(function() previewWireframe:Clear() end)
+				local rootPart = findPart("HumanoidRootPart", "LowerTorso", "Torso", "UpperTorso")
+				if skVisible and rootPart then
+					previewWireframe.Adornee = rootPart
+					local order = findPart("UpperTorso") and previewSkeletonOrder or previewSkeletonOrderR6
+					local rootCf = rootPart.CFrame
+					local points = {}
+					local counter = 0
+					for partName, parentName in pairs(order) do
+						local part = findPart(partName)
+						local parentPart = findPart(parentName)
+						if part and parentPart then
+							points[counter + 1] = rootCf:VectorToObjectSpace(part.Position - rootCf.Position)
+							points[counter + 2] = rootCf:VectorToObjectSpace(parentPart.Position - rootCf.Position)
+							counter += 2
+						end
+					end
+					if counter > 0 then pcall(function() previewWireframe:AddLines(points) end) end
+				else
+					previewWireframe.Adornee = nil
+				end
+			end
+			-- 2D fallback is needed because some executors do not render
+			-- WireframeHandleAdornment inside ViewportFrame. It uses the same bone map.
+			local segs = getSkeletonSegments()
+			for i, line in ipairs(skeletonLines) do
+				local seg = segs[i]
+				if seg then
+					setLine(line, seg[1], seg[2], skColor, skTrans, skVisible)
+				else
+					line.Visible = false
+				end
+			end
+
+			-- Arrow ESP is an off-screen indicator and looks like a random triangle
+			-- inside a small preview window, so do not render it here.
+			arrowLabel.Visible = false
+		end)
+	end
+end
+-- ---- /floating ESP preview ----
 
 --[[{
 	name = "New Toggle",
